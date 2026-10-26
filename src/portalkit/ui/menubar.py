@@ -22,8 +22,32 @@ from typing import Callable, Optional
 import rumps
 
 from portalkit.adapters import default_registry
-from portalkit.adapters.base import DetectionResult
-from portalkit.cli import DEFAULT_STATE_DIR, _build_engine
+
+
+def _patch_rumps_nsimage() -> None:
+    """绕过 rumps 0.4 × pyobjc 12 兼容 bug：initByReferencingFile_ 在
+    Python 3.14 下抛 OC_PythonURL length 异常，导致状态图标永远无法更新
+    （2026-10-26 实测）。语义等价替换为 initWithContentsOfFile_。"""
+    from AppKit import NSImage
+    import rumps.rumps as _rumps_mod
+
+    def _nsimage_from_file(filename, template=None, dimensions=None):
+        image = NSImage.alloc().initWithContentsOfFile_(str(filename))
+        if image is None:
+            return None
+        image.setScalesWhenResized_(True)
+        image.setSize_((20, 20) if dimensions is None else dimensions)
+        if template is not None:
+            image.setTemplate_(template)
+        return image
+
+    _rumps_mod._nsimage_from_file = _nsimage_from_file
+
+
+_patch_rumps_nsimage()
+
+from portalkit.cli import DEFAULT_STATE_DIR, _build_engine  # noqa: E402
+from portalkit.adapters.base import DetectionResult  # noqa: E402
 from portalkit.core.engine import Engine
 from portalkit.core.settings import Settings, SettingsStore
 from portalkit.core.trust import TrustRegistry
@@ -188,6 +212,12 @@ class EngineWorker(threading.Thread):
                 else:
                     state = self.engine.check()
             self.holder.update(state, self.engine._monitor.current_snapshot(), False)  # noqa: SLF001
+            print(
+                f"[portalkit-ui] engine {kind}: phase={state.phase.value} "
+                f"err={state.error_code.value} gen={state.network_generation} "
+                f"iface={state.interface}",
+                flush=True,
+            )
         except Exception as exc:  # noqa: BLE001 — 工作线程兜底
             print(f"[portalkit-ui] engine error: {type(exc).__name__}: {exc}", flush=True)
             self._set_busy(False)
@@ -247,7 +277,9 @@ class PortalKitApp(rumps.App):
         self.worker.submit("check")
         self._windows: dict[str, object] = {}
         self._last_notify_key: tuple | None = None
-        rumps.Timer(self._tick, 1).start()
+        self._last_rendered: str | None = None
+        self._timer = rumps.Timer(self._tick, 1)
+        self._timer.start()
 
     # ------------------------------------------------------------ callbacks
 
@@ -292,6 +324,15 @@ class PortalKitApp(rumps.App):
     # ------------------------------------------------------------ ui refresh
 
     def _tick(self, _timer) -> None:
+        try:
+            self._tick_inner()
+        except Exception as exc:  # noqa: BLE001 — 计时回调兜底，避免静默死亡
+            import traceback
+
+            print(f"[portalkit-ui] tick error: {type(exc).__name__}: {exc}", flush=True)
+            traceback.print_exc()
+
+    def _tick_inner(self) -> None:
         state, snapshot, busy, detection = self._holder.get()
         if detection is not None and "onboarding" in self._windows:
             onboarding = self._windows["onboarding"]
@@ -303,12 +344,13 @@ class PortalKitApp(rumps.App):
         if state is None:
             return
         tag = _TAG_BY_PHASE.get(state.phase, state.phase.value)
-        if busy:
-            tag = tag if state.phase in _IN_FLIGHT else f"{tag}"
         self._hdr_tag.title = f"PortalKit — {tag}"
         detail = state.detail or state.message_key
         iface = f" · {state.interface}" if state.interface else ""
         self._hdr_detail.title = f"{detail}{iface}"[:120]
+        if tag != self._last_rendered:
+            self._last_rendered = tag
+            print(f"[portalkit-ui] ui: {tag} ({state.error_code.value})", flush=True)
         self._maybe_notify(state)
 
     def _maybe_notify(self, state: StateSnapshot) -> None:

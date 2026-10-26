@@ -308,13 +308,13 @@ class Engine:
                             evidence=list(auth.evidence))
 
             if auth.code == AuthCode.ALREADY_AUTHENTICATED:
-                return self._finish(self._verify(
+                return self._verify(
                     snap, generation, matched_adapter, internet_state=internet.state, already=True,
-                ))
+                )
             if auth.code == AuthCode.SUCCESS:
-                return self._finish(self._verify(
+                return self._verify(
                     snap, generation, matched_adapter, internet_state=internet.state, already=False,
-                ))
+                )
             return self._finish(self._auth_failure(snap, generation, matched.adapter_id, auth, internet))
 
         finally:
