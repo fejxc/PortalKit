@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import queue
+import subprocess
 import threading
 import time
 from dataclasses import dataclass
@@ -397,15 +398,24 @@ def build_context() -> UIContext:
 
 
 def _single_instance_guard(state_dir: Path) -> bool:
-    """返回 True 表示可以继续；已有实例在跑则 False。"""
+    """返回 True 表示可以继续；已有实例在跑则 False。
+
+    pid 存活检查必须同时验证进程身份——PID 可能被系统复用给无关进程
+    （2026-10-26 实测：旧 pid 被复用导致新实例永远无法启动）。
+    """
     lock = state_dir / "ui.pid"
     state_dir.mkdir(parents=True, exist_ok=True)
     if lock.exists():
         try:
             pid = int(lock.read_text().strip())
-            os.kill(pid, 0)
-            return False  # 进程仍存活
-        except (ValueError, ProcessLookupError, PermissionError):
+            proc = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "args="],
+                capture_output=True, text=True, timeout=5, check=False,
+            )
+            args_text = proc.stdout
+            if "portalkit.ui.menubar" in args_text or "PortalKit.app" in args_text:
+                return False  # 确认是另一个 PortalKit 实例
+        except (ValueError, OSError, subprocess.SubprocessError):
             pass
     lock.write_text(str(os.getpid()))
     import atexit

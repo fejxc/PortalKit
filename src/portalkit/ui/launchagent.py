@@ -29,11 +29,11 @@ def log_path() -> Path:
     return Path.home() / LOG_SUBPATH
 
 
-def build_plist(python_exe: str, log_file: str) -> dict:
-    """纯函数：返回 plist 字典（ProgramArguments 钉死 venv 解释器）。"""
+def build_plist(program_args: list[str], log_file: str) -> dict:
+    """纯函数：返回 plist 字典（ProgramArguments 由调用方决定）。"""
     return {
         "Label": LABEL,
-        "ProgramArguments": [python_exe, "-m", "portalkit.ui.menubar"],
+        "ProgramArguments": program_args,
         "RunAtLoad": True,
         "KeepAlive": False,  # 菜单栏应用崩溃不自动复活，避免僵尸循环；用户可手动重开
         "ProcessType": "Interactive",
@@ -43,12 +43,22 @@ def build_plist(python_exe: str, log_file: str) -> dict:
     }
 
 
+def _program_args() -> list[str]:
+    """优先使用已部署的独立 bundle；开发态回退 venv 解释器。"""
+    from portalkit.ui.appbundle import bundle_executable
+
+    exe = bundle_executable()
+    if exe:
+        return [str(exe)]
+    return [sys.executable, "-m", "portalkit.ui.menubar"]
+
+
 def installed() -> bool:
     return plist_path().exists()
 
 
 def install() -> bool:
-    plist = build_plist(sys.executable, str(log_path()))
+    plist = build_plist(_program_args(), str(log_path()))
     plist_path().parent.mkdir(parents=True, exist_ok=True)
     plist_path().write_bytes(plistlib.dumps(plist))
     return _start()

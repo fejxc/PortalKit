@@ -28,6 +28,53 @@ def bundle_path(install_dir: Path | None = None) -> Path:
     return (install_dir or default_install_dir()) / f"{APP_NAME}.app"
 
 
+def bundle_executable() -> Path | None:
+    """已部署的独立 PortalKit.app 的可执行路径（优先 /Applications）。"""
+    for base in (Path("/Applications"), Path.home() / "Applications"):
+        exe = base / f"{APP_NAME}.app" / "Contents" / "MacOS" / APP_NAME
+        if exe.exists():
+            return exe
+    return None
+
+
+def build_standalone(install_dir: Path | None = None) -> Path:
+    """PyInstaller 构建自包含 PortalKit.app 并部署（目标机无需 Python）。
+
+    流程：生成 AppIcon.icns → PyInstaller(spec) → 注入图标/Info.plist →
+    ad-hoc 签名 → 复制到 /Applications（无权限则 ~/Applications）。
+    """
+    import shutil
+
+    project_root = Path(__file__).resolve().parents[3]
+    build_dir = project_root / "build"
+    icns = build_dir / "appicon.icns"
+    if not _make_icns(project_root / "assets" / "appicon.png", icns, build_dir):
+        raise RuntimeError("AppIcon.icns 生成失败")
+    subprocess.run(
+        [
+            sys.executable, "-m", "PyInstaller", "--clean", "-y",
+            str(project_root / "scripts" / "portalkit.spec"),
+            "--distpath", str(build_dir / "dist"),
+            "--workpath", str(build_dir / "work"),
+        ],
+        check=True,
+    )
+    staged = build_dir / "dist" / f"{APP_NAME}.app"
+    info_path = staged / "Contents" / "Info.plist"
+    info = plistlib.loads(info_path.read_bytes())
+    shutil.copyfile(icns, staged / "Contents" / "Resources" / "AppIcon.icns")
+    info["CFBundleIconFile"] = "AppIcon"
+    info_path.write_bytes(plistlib.dumps(info))
+    _adhoc_sign(staged)
+
+    dest = bundle_path(install_dir)
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(staged, dest)
+    _adhoc_sign(dest)
+    return dest
+
+
 def build_info_plist() -> dict:
     return {
         "CFBundleName": APP_NAME,

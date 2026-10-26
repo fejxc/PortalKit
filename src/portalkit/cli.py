@@ -195,11 +195,21 @@ def cmd_startup(args) -> int:
 
 def cmd_app(args) -> int:
     if args.action == "install":
-        from portalkit.ui.appbundle import build_bundle, bundle_path
+        if args.dev:
+            from portalkit.ui.appbundle import build_bundle
 
-        path = build_bundle(sys.executable)
-        print(f"已创建应用: {path}")
-        print("双击启动，或：open -a PortalKit")
+            path = build_bundle(sys.executable)
+            print(f"已创建开发态应用(依赖 venv): {path}")
+            return _EXIT_OK
+        from portalkit.ui.appbundle import build_standalone
+
+        try:
+            path = build_standalone()
+        except Exception as exc:  # noqa: BLE001 — 构建失败给出可读原因
+            print(f"独立构建失败: {exc}", file=sys.stderr)
+            return _EXIT_ERROR
+        print(f"已构建独立应用(无需 Python): {path}")
+        print("双击启动，或：open -a PortalKit；登录自启：portalkit startup install")
         return _EXIT_OK
     if args.action == "open":
         from portalkit.ui.appbundle import bundle_path
@@ -210,7 +220,7 @@ def cmd_app(args) -> int:
             return _EXIT_ACTION_REQUIRED
         subprocess.run(["open", str(path)], check=False)
         return _EXIT_OK
-    print("用法: portalkit app install | app open", file=sys.stderr)
+    print("用法: portalkit app install [--dev] | app open", file=sys.stderr)
     return _EXIT_INTERNAL
 
 
@@ -413,9 +423,12 @@ def build_parser() -> argparse.ArgumentParser:
     startup_sub.add_parser("uninstall", parents=[common]).set_defaults(func=cmd_startup)
     startup_sub.add_parser("status", parents=[common]).set_defaults(func=cmd_startup)
 
-    app_p = add("app", help="本地 PortalKit.app（双击启动）管理")
+    app_p = add("app", help="PortalKit.app 管理（默认独立打包，无需 Python）")
     app_sub = app_p.add_subparsers(dest="action", required=True)
-    app_sub.add_parser("install", parents=[common]).set_defaults(func=cmd_app)
+    p = app_sub.add_parser("install", parents=[common])
+    p.add_argument("--dev", action="store_true",
+                   help="构建开发态 bundle（依赖 ~/PortalKit/.venv，体积小）")
+    p.set_defaults(func=cmd_app)
     p = app_sub.add_parser("open", parents=[common], help="启动已安装的 PortalKit.app")
     p.add_argument("--install-dir", help=argparse.SUPPRESS)
     p.set_defaults(func=cmd_app)
