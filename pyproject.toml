@@ -1,0 +1,23 @@
+[project]
+name = "portalkit"
+version = "0.1.0"
+description = "PortalKit — macOS 智能网络门户认证助手（P0 核心：CLI + 可复用核心库）"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+portalkit = "portalkit.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
