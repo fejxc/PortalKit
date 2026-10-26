@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write  # 创建 Release 需要写权限
+
+jobs:
+  release:
+    runs-on: macos-15  # arm64：产物为 Apple Silicon 原生应用
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install
+        run: python -m pip install -e '.[ui,dev]' pyinstaller
+
+      - name: Test
+        run: python -m pytest -q
+
+      - name: Build standalone app
+        run: python scripts/build_release.py
+
+      - name: Verify bundle
+        run: |
+          APP="build/dist/PortalKit.app"
+          codesign --verify --deep --strict "$APP"
+          plutil -lint "$APP/Contents/Info.plist"
+          echo "版本: $(python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            build/release/*.zip \
+            --title "PortalKit ${GITHUB_REF_NAME}" \
+            --notes "自包含 macOS 菜单栏应用（Apple Silicon 原生，无需安装 Python）。
+
+          **安装**：解压后将 PortalKit.app 拖入「应用程序」，双击打开。
+          首次打开若提示未公证：右键 → 打开（本版本为 ad-hoc 签名，个人构建）。
+          登录自启：\`portalkit startup install\`（CLI 需源码环境）或系统设置 → 通用 → 登录项。
+
+          变更日志由 GitHub 自动生成。" \
+            --verify-tag

@@ -8,6 +8,8 @@
 import os
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
+# 版本由构建脚本从 pyproject.toml 注入（PORTALKIT_VERSION），本地直跑用开发号
+VERSION = os.environ.get("PORTALKIT_VERSION", "0.0.0-dev")
 
 a = Analysis(
     [os.path.join(ROOT, "src", "portalkit", "ui", "menubar.py")],
@@ -53,8 +55,8 @@ app = BUNDLE(
         "CFBundleName": "PortalKit",
         "CFBundleDisplayName": "PortalKit",
         "CFBundleIdentifier": "com.fejxc.portalkit",
-        "CFBundleShortVersionString": "0.3.0",
-        "CFBundleVersion": "0.3.0",
+        "CFBundleShortVersionString": VERSION,
+        "CFBundleVersion": VERSION,
         "LSUIElement": True,  # 纯菜单栏应用：无 Dock 图标
         "NSHighResolutionCapable": True,
         "NSHumanReadableCopyright": "Local build",
