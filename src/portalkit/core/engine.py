@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from portalkit.adapters.base import AdapterContext, AuthCode, Credentials, DetectionResult, PortalAdapter
+from portalkit.adapters.base import AdapterContext, AuthCode, AuthResult, Credentials, DetectionResult, PortalAdapter
 from portalkit.adapters.registry import AdapterRegistry
 from portalkit.core.retry import RetryPolicy
 from portalkit.core.statemachine import assert_transition
@@ -82,6 +82,10 @@ class Engine:
     def authenticate(self) -> StateSnapshot:
         """完整认证流。前置：目标已信任 + Keychain 有凭据，否则转 WAITING_USER。"""
         return self._run(allow_auth=True)
+
+    def refresh_session(self) -> StateSnapshot:
+        """用户主动恢复：物理在线时跳过；信任校验后探测注销能力再认证。"""
+        return self._run(allow_auth=True, refresh=True)
 
     def auto_run(self) -> StateSnapshot:
         """宿主调度入口（菜单栏 / launchd）：检查 → 若发现已信任门户则自动认证。
@@ -168,7 +172,7 @@ class Engine:
 
     _last_phase: Phase = Phase.IDLE  # 引擎级记忆，仅用于转移合法性自检
 
-    def _run(self, *, allow_auth: bool) -> StateSnapshot:
+    def _run(self, *, allow_auth: bool, refresh: bool = False) -> StateSnapshot:
         if not self._lock.acquire(blocking=False):
             snap = self._monitor.current_snapshot()
             return self._state(
@@ -258,6 +262,19 @@ class Engine:
                     detail="门户特征与已信任记录不一致，自动提交已暂停",
                     evidence=matched.evidence,
                 ))
+
+            if refresh:
+                recover = getattr(matched_adapter, "refresh_session", None)
+                try:
+                    self._monitor.check_generation(generation)
+                    recovery = (recover(self._context(snap, generation)) if recover else
+                                AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                                           evidence=("该门户尚无经过验证的注销能力，请重新加入网络或联系管理员。",)))
+                    self._monitor.check_generation(generation)
+                except GenerationStale:
+                    return self._cancelled(snap)
+                if recovery.code != AuthCode.SUCCESS:
+                    return self._auth_failure(snap, generation, matched.adapter_id, recovery, internet)
 
             if matched.already_authenticated and not allow_auth:
                 # check 场景：门户报会话有效 → 只做物理验证，不提交。
@@ -352,7 +369,8 @@ class Engine:
         return self._finish(self._state(
             snap, generation, link=LinkState.READY, portal=portal,
             internet=internet.state, phase=phase, adapter_id=adapter_id,
-            error=error, detail=detail, evidence=auth.evidence,
+            error=error, detail=(auth.evidence[-1] if auth.code == AuthCode.INTERACTION_REQUIRED and auth.evidence else detail),
+            evidence=(*internet.evidence, *auth.evidence),
         ))
 
     def _verify(self, snap, generation, adapter: PortalAdapter, *, internet_state, already: bool) -> StateSnapshot:
@@ -390,7 +408,7 @@ class Engine:
             snap, generation, link=LinkState.READY, portal=PortalState.AUTHENTICATED,
             internet=internet.state, phase=Phase.DEGRADED, adapter_id=adapter.id,
             error=ErrorCode.VERIFY_FAILED,
-            detail="认证已响应，但物理网络验证未通过——不显示已联网",
+            detail="认证已响应，但物理网络验证未通过。可尝试强制刷新会话；若无注销入口，请忽略网络后重新加入或联系管理员。",
             evidence=(*protocol.evidence, *internet.evidence),
         ))
 

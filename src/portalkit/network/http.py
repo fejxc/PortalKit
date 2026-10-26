@@ -5,8 +5,8 @@
 - **物理绑定**：socket 设 `IP_BOUND_IF`（macOS）钉在指定物理网卡，
   Clash TUN 接管默认路由时仍从物理路径出入（迁移自
   `zjlib-wifi/zjlib/wifi_login.py` 的 `_bound_create_connection`）。
-- **按接口 DNS**：目标是域名时先经物理接口的 DHCP 解析器解析（见
-  network/dns.py），避免 fake-ip；URL 用解析后的 IP 重建并显式带 Host 头。
+- **按接口 DNS**：建连时经物理接口 DNS 回退链解析（见 network/dns.py），
+  避免 fake-ip；逻辑 URL、Host、Cookie 域与 TLS SNI 保留域名。
 - **禁代理**：opener 层 `ProxyHandler({})`，环境残留代理变量不影响。
 - **受控重定向**：携带凭据的请求阶段 redirect 只允许落在
   ``allowed_hosts`` 内，越界目标抛 `UntrustedRedirectError`，
@@ -14,7 +14,7 @@
 - **Cookie 隔离**：每实例独立 CookieJar；Cookie 按域隔离天然不跨宿主发送。
 - **证书指纹捕获**：TLS 连接记录叶证书 SHA-256，供信任记录做 pinning。
 - **TLS 策略**：`tls_verify=False` 仅用于已知的自签门户（zjlib），
-  并由指纹校验补偿；域名 + 校验开启 + 接口绑定的组合 P0 不支持（显式报错）。
+  并由指纹校验补偿；域名目标使用原域名验证证书。
 """
 
 from __future__ import annotations
@@ -80,12 +80,14 @@ def _redact_url(url: str) -> str:
     return parts._replace(query="<redacted>").geturl()
 
 
-def _bound_create_connection(interface_name: str, cert_sink: dict):
+def _bound_create_connection(interface_name: str, cert_sink: dict, resolve=None):
     """生成替代 socket.create_connection 的工厂（zjlib 同款思路）。"""
     ifindex = socket.if_nametoindex(interface_name)
 
     def create_connection(address, timeout=None, source_address=None):
         host, port = address
+        if resolve is not None:
+            host = resolve(host)
         af, socktype, proto, _, sock_addr = socket.getaddrinfo(
             host, port, socket.AF_INET, socket.SOCK_STREAM
         )[0]
@@ -96,7 +98,12 @@ def _bound_create_connection(interface_name: str, cert_sink: dict):
         if timeout is not None:
             sock.settimeout(timeout)
         cert_sink["sock"] = sock
-        sock.connect(sock_addr)
+        try:
+            sock.connect(sock_addr)
+        except BaseException:
+            sock.close()
+            raise
+        cert_sink["tcp_connected"] = True
         return sock
 
     return create_connection
@@ -105,12 +112,13 @@ def _bound_create_connection(interface_name: str, cert_sink: dict):
 class _BoundHTTPConnection(http.client.HTTPConnection):
     interface_name = ""
     cert_sink: dict = {}
+    _resolve_host = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if self.interface_name:
             self._create_connection = _bound_create_connection(
-                self.interface_name, type(self).cert_sink
+                self.interface_name, type(self).cert_sink, self._resolve_host
             )
 
 
@@ -150,7 +158,7 @@ class _ControlledRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def _make_connection_classes(
-    interface: str | None, cert_sink: dict
+    interface: str | None, cert_sink: dict, resolve=None
 ) -> tuple[type, type]:
     if interface is None:
         return http.client.HTTPConnection, http.client.HTTPSConnection
@@ -158,12 +166,12 @@ def _make_connection_classes(
     http_cls = type(
         f"_BoundHTTP_{interface}",
         (_BoundHTTPConnection,),
-        {"interface_name": interface, "cert_sink": cert_sink},
+        {"interface_name": interface, "cert_sink": cert_sink, "_resolve_host": staticmethod(resolve)},
     )
     https_cls = type(
         f"_BoundHTTPS_{interface}",
         (_BoundHTTPSConnection,),
-        {"interface_name": interface, "cert_sink": cert_sink},
+        {"interface_name": interface, "cert_sink": cert_sink, "_resolve_host": staticmethod(resolve)},
     )
     return http_cls, https_cls
 
@@ -204,6 +212,7 @@ class BoundHTTPClient:
         )
         self._dns = dns_resolver
         self.cert_sink: dict = {}
+        self.evidence: list[str] = []
 
     # ------------------------------------------------------------------ URL
 
@@ -215,11 +224,8 @@ class BoundHTTPClient:
         if cached:
             return cached
         resolver = self._dns
-        if not resolver:
-            raise NetworkRequestError(
-                f"接口 {self._spec.interface} 无可用 DNS 解析器，无法解析 {host}"
-            )
-        ip = dns_query_a(host, resolver, self._spec.interface)
+        ip = dns_query_a(host, resolver, self._spec.interface,
+                         timeout=self._spec.timeout, evidence=self.evidence)
         if not ip:
             raise NetworkRequestError(f"按接口 DNS 解析失败: {host}")
         self._spec.resolved_dns[host] = ip
@@ -230,14 +236,9 @@ class BoundHTTPClient:
         host = parts.hostname or ""
         if self._spec.interface is None or is_ip_literal(host):
             return url
-        ip = self._resolve(host)
-        netloc = ip if parts.port is None else f"{ip}:{parts.port}"
-        new = parts._replace(netloc=netloc).geturl()
-        # 显式 Host 头保留原始主机名（http.client 检测到 Host 头会跳过自动注入）
-        headers.setdefault(
-            "Host", host if parts.port is None else f"{host}:{parts.port}"
-        )
-        return new
+        # urllib 始终保留逻辑 URL：Cookie 域、同源重定向、Host 与 TLS SNI
+        # 都使用原域名。只在建连工厂中使用物理 DNS 得到的 IP。
+        return url
 
     # --------------------------------------------------------------- opener
 
@@ -248,7 +249,7 @@ class BoundHTTPClient:
         else:
             context = ssl._create_unverified_context()  # noqa: SLF001 — 自签门户（zjlib），指纹 pinning 补偿
 
-        http_cls, https_cls = _make_connection_classes(spec.interface, self.cert_sink)
+        http_cls, https_cls = _make_connection_classes(spec.interface, self.cert_sink, self._resolve)
 
         http_handler = urllib.request.HTTPHandler()
         http_handler.http_open = lambda req: self._do_open(  # type: ignore[method-assign]
@@ -305,6 +306,7 @@ class BoundHTTPClient:
         if headers:
             merged.update(headers)
 
+        self.cert_sink["tcp_connected"] = False
         target = self._prepare(url, merged)
         if isinstance(data, str):
             data = data.encode("utf-8")

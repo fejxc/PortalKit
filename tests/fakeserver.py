@@ -51,6 +51,9 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         self._dispatch("POST")
 
+    def do_HEAD(self):  # noqa: N802
+        self._dispatch("HEAD")
+
 
 class FakePortalServer:
     """用法：portal.route("GET", "/path", fn)；fn(portal, rec, query)->(status, headers, body)。"""

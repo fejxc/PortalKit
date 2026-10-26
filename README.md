@@ -27,6 +27,7 @@ portalkit check [--json]          # 物理网络探测 + 门户识别（不提�
 portalkit trust add --adapter zjlib   # 首次信任：展示门户证据与目标，交互确认
 portalkit credentials set --adapter zjlib  # 账号录入（密码走 getpass，不入 argv/shell 历史）
 portalkit authenticate [--json]   # 仅对已信任目标执行认证 + 物理出口验证
+portalkit refresh-session [--json] # 用户主动恢复：发现并验证注销入口，再重新认证
 portalkit diagnostics             # 脱敏诊断摘要
 portalkit trust list | trust revoke --adapter zjlib
 portalkit credentials list | credentials delete --adapter zjlib
@@ -40,7 +41,9 @@ portalkit adapters                # 已注册适配器
 - HTTP 401 / 404 / 204 等 **每个门户语义独立**（zjlib：入口 404 = 已认证；zstu：探测 204 = 已在线），不共用魔法码。
 - 日志与诊断全程脱敏：不记录密码、Cookie/JSESSIONID、userIndex、RSA 明文。
 - 认证"提交成功" ≠ "已联网"：只有物理接口绑定路径上的多探针验证通过才显示已联网。
-- Clash TUN 共存：socket 经 `IP_BOUND_IF` 钉在物理网卡，DNS 经物理接口的 DHCP 解析器解析，绕开 fake-ip。
+- Clash TUN 共存：socket 经 `IP_BOUND_IF` 钉在动态发现的物理网卡；DNS 按 UDP → TCP → DoH 回退，DoH 使用 IP bootstrap 且验证 TLS 证书，不依赖系统 fake-ip DNS。
+- 诊断分别记录 DNS 各传输、TCP 建连、HTTP 状态及预期正文；域名探针失败后追加 IP 直连诊断。TCP 可达或单个 IP 返回 404 仅表示部分路径可用，不授予联网；至少两个域名探针验证通过才显示已联网。
+- 菜单「强制刷新会话」与 `refresh-session` 共用引擎的在线、信任及网络代次检查。zjlib 只使用当前门户 HTML 实际提供的同源注销链接，HEAD 探测成功后执行，并验证登录表单恢复；没有可验证入口时提示忽略网络后重加或联系管理员，不猜测 API。当前仅支持已发现的 GET 注销链接，JS/POST 注销协议需有真实证据后另行适配。
 
 ## 架构（Phase 1）
 

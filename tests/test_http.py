@@ -76,3 +76,24 @@ def test_url_query_not_logged_in_errors(portal):
         client.request("http://127.0.0.1:9/secret?wlanuserip=10.1.1.1&mac=AA")
     assert "wlanuserip" not in str(excinfo.value)
     assert "AA" not in str(excinfo.value)
+
+
+def test_physical_dns_preserves_logical_host_redirects_and_cookies(portal, monkeypatch):
+    calls = []
+    def resolve(host, resolver, interface, **kwargs):
+        calls.append((host, resolver, interface))
+        kwargs['evidence'].append('dns.udp:pass')
+        return '127.0.0.1'
+    monkeypatch.setattr('portalkit.network.http.dns_query_a', resolve)
+    portal.route('GET', '/start', lambda *args: (
+        302, {'Location': '/landing', 'Set-Cookie': 'test_session=local; Path=/'}, ''))
+    portal.route('GET', '/landing', lambda p, *args: (200, {},
+                 p.requests[-1]['headers'].get('cookie', 'missing')))
+    client = BoundHTTPClient(interface='lo0', dns_resolver='8.8.8.8',
+                             allowed_hosts={'probe.example'})
+    result = client.request(f'http://probe.example:{portal.port}/start')
+    assert result.url == f'http://probe.example:{portal.port}/landing'
+    assert result.text == 'test_session=local'
+    assert portal.requests[-1]['headers']['host'] == f'probe.example:{portal.port}'
+    assert calls == [('probe.example', '8.8.8.8', 'lo0')]
+    assert client.cert_sink['tcp_connected']

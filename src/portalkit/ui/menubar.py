@@ -180,6 +180,8 @@ class EngineWorker(threading.Thread):
                 self._detect()
             elif command == "authenticate":
                 self._run("authenticate")
+            elif command == "refresh-session":
+                self._run("refresh-session")
             elif command == "cancel":
                 self.engine.request_cancel()
             elif command == "settings_changed":
@@ -206,6 +208,8 @@ class EngineWorker(threading.Thread):
                 state = self.engine.check()
             elif kind == "authenticate":
                 state = self.engine.authenticate()
+            elif kind == "refresh-session":
+                state = self.engine.refresh_session()
             else:
                 if self.settings.get().auto_auth:
                     state = self.engine.auto_run()
@@ -255,6 +259,7 @@ class PortalKitApp(rumps.App):
             None,
             rumps.MenuItem("重新检查网络", key="r", callback=self._on_check),
             rumps.MenuItem("立即认证", callback=self._on_authenticate),
+            rumps.MenuItem("强制刷新会话", callback=self._on_refresh_session),
             rumps.MenuItem("取消当前任务", callback=self._on_cancel),
             None,
             rumps.MenuItem("添加 / 确认可信网络…", callback=self._on_onboarding),
@@ -288,6 +293,9 @@ class PortalKitApp(rumps.App):
 
     def _on_authenticate(self, _sender=None) -> None:
         self.worker.submit("authenticate")
+
+    def _on_refresh_session(self, _sender=None) -> None:
+        self.worker.submit("refresh-session")
 
     def _on_cancel(self, _sender=None) -> None:
         self.worker.submit("cancel")

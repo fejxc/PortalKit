@@ -127,3 +127,35 @@ def test_verify_protocol_semantics(portal):
     assert adapter.verify_protocol(make_ctx(portal)).session_valid is True
     _routes(portal, entry_status=200)
     assert adapter.verify_protocol(make_ctx(portal)).session_valid is False
+
+
+def test_refresh_all_404_does_not_guess_endpoints(portal):
+    portal.route("GET", "/cn/index.html", lambda *args: (404, {}, ""))
+    result = _adapter(portal).refresh_session(make_ctx(portal))
+    assert result.code == AuthCode.INTERACTION_REQUIRED
+    assert "忽略此网络" in result.evidence[-1]
+    assert len(portal.requests) == 1
+
+
+def test_refresh_discovered_logout_checks_alive_and_verifies_login(portal):
+    active = [True]
+    portal.route("GET", "/cn/index.html", lambda *args: (200, {},
+                 '<a href="/real-logoff">退出</a>' if active[0] else LOGIN_HTML))
+    portal.route("HEAD", "/real-logoff", lambda *args: (200, {}, ""))
+    def logout(*args):
+        active[0] = False
+        return 200, {}, "done"
+    portal.route("GET", "/real-logoff", logout)
+    result = _adapter(portal).refresh_session(make_ctx(portal))
+    assert result.code == AuthCode.SUCCESS
+    assert not active[0]
+    assert portal.requests_to('/real-logoff')[0]['method'] == 'HEAD'
+
+
+def test_refresh_dead_or_foreign_logout_never_executes(portal):
+    portal.route("GET", "/cn/index.html", lambda *args: (200, {},
+                 '<a href="/logout">退出</a><a href="http://evil.example/logout">退出</a>'))
+    portal.route("HEAD", "/logout", lambda *args: (404, {}, ""))
+    result = _adapter(portal).refresh_session(make_ctx(portal))
+    assert result.code == AuthCode.INTERACTION_REQUIRED
+    assert all(r['method'] != 'GET' for r in portal.requests_to('/logout'))

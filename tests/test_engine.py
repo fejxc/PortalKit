@@ -390,3 +390,45 @@ def test_auto_run_untrusted_stops_before_credentials(monkeypatch, tmp_path):
     state = engine.auto_run()
     assert state.phase == Phase.TRUST_REQUIRED
     assert adapter.auth_calls == 0
+
+
+def test_refresh_online_does_not_touch_portal(monkeypatch, tmp_path):
+    adapter = FakeAdapter()
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.REACHABLE)])
+    assert engine.refresh_session().phase == Phase.ONLINE_NO_AUTH
+    assert adapter.detect_calls == adapter.auth_calls == 0
+
+
+def test_refresh_requires_trust_and_does_not_read_credentials(monkeypatch, tmp_path):
+    adapter = FakeAdapter()
+    calls = []
+    adapter.refresh_session = lambda ctx: calls.append('logout')
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.BLOCKED)])
+    engine._trust.revoke('fake', 'portal.example')
+    state = engine.refresh_session()
+    assert state.phase == Phase.TRUST_REQUIRED and calls == []
+
+
+def test_refresh_no_endpoint_preserves_physical_evidence(monkeypatch, tmp_path):
+    adapter = FakeAdapter()
+    adapter.refresh_session = lambda ctx: AuthResult(AuthCode.INTERACTION_REQUIRED, 'action',
+                                                     evidence=('忽略网络后重新加入',))
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.UNKNOWN)])
+    state = engine.refresh_session()
+    assert state.phase == Phase.WAITING_USER
+    assert state.detail == '忽略网络后重新加入'
+    assert 'state=UNKNOWN' in state.evidence and adapter.auth_calls == 0
+
+
+def test_refresh_success_still_requires_physical_verification(monkeypatch, tmp_path):
+    adapter = FakeAdapter()
+    adapter.refresh_session = lambda ctx: AuthResult(AuthCode.SUCCESS, 'ok')
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.BLOCKED), _internet(InternetState.UNKNOWN)],
+                     creds=Credentials('test', 'test'))
+    state = engine.refresh_session()
+    assert state.phase == Phase.DEGRADED and state.internet == InternetState.UNKNOWN
+    assert adapter.auth_calls == 1

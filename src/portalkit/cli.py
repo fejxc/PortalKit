@@ -125,6 +125,12 @@ def cmd_authenticate(args) -> int:
     return _exit_for(state)
 
 
+def cmd_refresh_session(args) -> int:
+    state = _build_engine(args.state_dir).refresh_session()
+    _emit(state, args.json)
+    return _exit_for(state)
+
+
 def cmd_diagnostics(args) -> int:
     state_dir = args.state_dir or DEFAULT_STATE_DIR
     print("== PortalKit 诊断（脱敏） ==")
@@ -391,6 +397,7 @@ def build_parser() -> argparse.ArgumentParser:
     add("check", help="物理网络探测 + 门户识别（不提交凭据）").set_defaults(func=cmd_check)
 
     add("authenticate", help="对已信任目标执行认证与物理验证").set_defaults(func=cmd_authenticate)
+    add("refresh-session", help="探测已信任门户的注销入口并尝试刷新会话").set_defaults(func=cmd_refresh_session)
 
     p = add("diagnostics", help="脱敏诊断摘要")
     p.add_argument("--tail", type=int, default=20, help="事件条数")

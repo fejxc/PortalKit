@@ -33,6 +33,7 @@ ADAPTER_ID = "zjlib"
 API_VERSION = 1
 
 DEFAULT_ENTRY_URL = "https://2.2.1.1:8443/cn/index.html"
+RECOVERY_GUIDANCE = "未能验证可用的会话注销入口。请在系统 Wi-Fi 设置中忽略此网络后重新加入；仍失败时联系网络管理员清除旧会话/检查出口策略。浏览器代理可用不代表物理出口已验证。"
 
 _SUCCESS_TOKENS = (
     "auth_success.html", "success", "logout", "user has online",
@@ -53,11 +54,14 @@ class _PortalParser(html.parser.HTMLParser):
         super().__init__()
         self.iframes: list[str] = []
         self.forms: list[Form] = []
+        self.logout_links: list[str] = []
         self._current: Form | None = None
 
     def handle_starttag(self, tag, attrs):
         attr = {k.lower(): v or "" for k, v in attrs}
         tag = tag.lower()
+        if tag == "a" and re.search(r"(?:logout|logoff)", attr.get("href", ""), re.I):
+            self.logout_links.append(attr["href"])
         if tag == "iframe" and attr.get("src"):
             self.iframes.append(attr["src"])
         elif tag == "form":
@@ -246,6 +250,9 @@ class ZjlibAdapter:
             return AuthResult(AuthCode.NETWORK_ERROR, "error.network", retryable=True,
                               evidence=(exc.reason,))
         if login.status != 200:
+            if entry.status == 404 and login.status == 404:
+                return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                                  evidence=("portal session active but login page unavailable; " + RECOVERY_GUIDANCE,))
             return AuthResult(AuthCode.NETWORK_ERROR, "error.network", retryable=True,
                               evidence=(f"login page http {login.status}",))
         form = _pick_form(_parse(login.text).forms)
@@ -288,6 +295,53 @@ class ZjlibAdapter:
                           evidence=("no success marker", snippet))
 
     # ------------------------------------------------------- verify_protocol
+
+    def refresh_session(self, ctx: AdapterContext) -> AuthResult:
+        """仅执行当前门户 HTML 实际暴露且 HEAD 存活的同源注销入口。
+
+        历史登录快照无 logout API；全站 404 时不猜测任何路径。
+        注销后必须重新看到登录表单才报告可继续认证。
+        """
+        client = self._client(ctx)
+        evidence = []
+        try:
+            ctx.check_generation()
+            entry = client.request(self._entry_url)
+            evidence.append(f"recovery.entry:http{entry.status}")
+            source = entry
+            if entry.status == 200:
+                page = _find_login_page(entry.url, entry.text)
+                if page != entry.url:
+                    ctx.check_generation()
+                    source = client.request(page)
+            links = _parse(entry.text).logout_links + _parse(source.text).logout_links
+            origin = urllib.parse.urlsplit(self._entry_url)
+            for link in dict.fromkeys(links):
+                url = urllib.parse.urljoin(source.url, link)
+                target = urllib.parse.urlsplit(url)
+                if (target.scheme, target.netloc) != (origin.scheme, origin.netloc) or target.username:
+                    continue
+                ctx.check_generation()
+                alive = client.request(url, method="HEAD")
+                evidence.append(f"recovery.logout-probe:http{alive.status}")
+                if not 200 <= alive.status < 300:
+                    continue
+                ctx.check_generation()
+                client.request(url)
+                ctx.check_generation()
+                login = client.request(self._entry_url)
+                login_page = _find_login_page(login.url, login.text)
+                if login_page != login.url:
+                    ctx.check_generation()
+                    login = client.request(login_page)
+                if login.status == 200 and _pick_form(_parse(login.text).forms):
+                    return AuthResult(AuthCode.SUCCESS, "status.authenticating_done",
+                                      evidence=(*evidence, "recovery:login-form-restored"))
+            evidence.append("recovery:no-verified-logout-endpoint")
+        except NetworkRequestError:
+            evidence.append("recovery:network-failed")
+        return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                          evidence=(*evidence, RECOVERY_GUIDANCE))
 
     def verify_protocol(self, ctx: AdapterContext) -> ProtocolVerifyResult:
         client = self._client(ctx)
