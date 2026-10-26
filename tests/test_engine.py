@@ -338,6 +338,48 @@ def test_auto_run_trusted_portal_authenticates_and_verifies(monkeypatch, tmp_pat
     assert adapter.verify_calls == 1
 
 
+def test_authenticate_ignores_already_authenticated_hint(monkeypatch, tmp_path):
+    """现场教训（2026-10-26）：物理不通时 detect 的"会话有效"弱证据不可信，
+    authenticate 必须完整提交刷新会话；check 场景才允许走捷径。"""
+    adapter = FakeAdapter(
+        detection=DetectionResult(
+            matched=True, adapter_id="fake",
+            portal_scheme="http", portal_host="portal.example", portal_port=80,
+            fingerprint="fp1", already_authenticated=True,
+        ),
+        auth_results=[AuthResult(AuthCode.SUCCESS, "ok")],
+    )
+    engine = _engine(
+        monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+        [_internet(InternetState.BLOCKED),     # authenticate 流程内探测
+         _internet(InternetState.REACHABLE)],  # 认证后物理验证
+        creds=Credentials("u", "p"),
+    )
+    state = engine.authenticate()
+    assert state.phase == Phase.ONLINE_AUTHENTICATED
+    assert adapter.auth_calls == 1
+
+
+def test_check_uses_already_authenticated_shortcut(monkeypatch, tmp_path):
+    """check 不提交凭据：already_authenticated → 只验证物理路径。"""
+    adapter = FakeAdapter(
+        detection=DetectionResult(
+            matched=True, adapter_id="fake",
+            portal_scheme="http", portal_host="portal.example", portal_port=80,
+            fingerprint="fp1", already_authenticated=True,
+        ),
+    )
+    engine = _engine(
+        monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+        [_internet(InternetState.BLOCKED), _internet(InternetState.REACHABLE)],
+        creds=Credentials("u", "p"),
+    )
+    state = engine.check()
+    assert adapter.auth_calls == 0
+    assert adapter.verify_calls == 1
+    assert state.phase == Phase.ONLINE_AUTHENTICATED
+
+
 def test_auto_run_untrusted_stops_before_credentials(monkeypatch, tmp_path):
     """auto_run：未信任门户 → 只到 TRUST_REQUIRED，0 次凭据提交。"""
     adapter = FakeAdapter()

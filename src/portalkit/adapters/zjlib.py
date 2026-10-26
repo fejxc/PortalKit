@@ -229,9 +229,12 @@ class ZjlibAdapter:
             return AuthResult(AuthCode.NETWORK_ERROR, "error.network", retryable=True,
                               evidence=(exc.reason,))
         if entry.status == 404:
-            return AuthResult(AuthCode.ALREADY_AUTHENTICATED, "status.no_auth",
-                              evidence=("entry 404 = session active",))
-        if entry.status != 200:
+            # 门户语义 404=会话有效，但在 authenticate 上下文（物理路径已知不通，
+            # 由 core 前置探针过滤在线场景 / 用户主动要求认证）里该弱证据不可信：
+            # 会话可能已按 IP 过期。照常提交登录以刷新会话；"已在线不重复提交"
+            # (A03) 由 check/auto_run 的互联网探针保证，不在此处拦截。
+            pass
+        elif entry.status != 200:
             return AuthResult(AuthCode.NETWORK_ERROR, "error.network", retryable=True,
                               evidence=(f"entry http {entry.status}",))
 

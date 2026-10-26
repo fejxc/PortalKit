@@ -259,12 +259,14 @@ class Engine:
                     evidence=matched.evidence,
                 ))
 
-            if matched.already_authenticated:
-                # 门户语义层面会话有效（zjlib 404 / zstu success.jsp），仍需物理验证。
-                return self._finish(self._verify(
+            if matched.already_authenticated and not allow_auth:
+                # check 场景：门户报会话有效 → 只做物理验证，不提交。
+                # authenticate 场景不采用该捷径——物理路径已知不通时
+                # "会话有效"弱证据不可信，必须提交刷新会话（2026-10-26 现场教训）。
+                return self._verify(
                     snap, generation, matched_adapter, internet_state=internet.state,
                     already=True,
-                ))
+                )
 
             if not allow_auth:
                 return self._finish(self._state(

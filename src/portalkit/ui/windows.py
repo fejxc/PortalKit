@@ -330,6 +330,13 @@ class CredentialsWindow:
             return
         self.ctx.credentials.save(rec.adapter_id, rec.portal_host, username, password)
         self.ctx.logger.event("credentials_saved", adapter=rec.adapter_id, host=rec.portal_host)
+        self.password.setStringValue_("")  # 保存后清空明文，避免残留
+        _confirm(
+            "已保存",
+            f"凭据已写入 Keychain（{rec.portal_host} · 账号 {username}）。\n"
+            "点击菜单栏「立即认证」执行认证。",
+            "好",
+        )
 
     def _delete(self) -> None:
         rec = self._selected()

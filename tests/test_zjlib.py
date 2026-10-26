@@ -104,12 +104,21 @@ def test_authenticate_unknown_error_is_not_claimed_as_success(portal):
     assert result.code != AuthCode.SUCCESS
 
 
-def test_authenticate_entry_404_already_authenticated(portal):
+def test_authenticate_entry_404_still_submits_to_refresh_session(portal):
+    """物理不通的 authenticate 上下文中，404（会话有效弱证据）不可信：
+    必须照常提交登录刷新会话；防重复提交由前置互联网探针保证（A03）。"""
     _routes(portal, entry_status=404)
     adapter = _adapter(portal)
     result = adapter.authenticate(make_ctx(portal), Credentials("u1", "p1"))
-    assert result.code == AuthCode.ALREADY_AUTHENTICATED
-    assert portal.requests_to("/cn/login") == []  # 未提交任何表单
+    assert result.code == AuthCode.SUCCESS
+    assert portal.requests_to("/cn/login"), "404 时也必须提交登录表单刷新会话"
+
+
+def test_authenticate_entry_404_with_credential_error_classified(portal):
+    _routes(portal, entry_status=404, submit_html=CRED_ERROR_HTML)
+    adapter = _adapter(portal)
+    result = adapter.authenticate(make_ctx(portal), Credentials("u1", "bad"))
+    assert result.code == AuthCode.INVALID_CREDENTIALS
 
 
 def test_verify_protocol_semantics(portal):
