@@ -109,6 +109,9 @@ def _button(frame, title: str, callback: Callable[[], None]) -> NSButton:
     btn.setButtonType_(NSMomentaryPushInButton)
     btn.setBezelStyle_(NSRoundedBezelStyle)
     bridge = _ActionBridge.alloc().initWithCallback_(callback)
+    # NSControl 的 target 是 unsafe_unretained（弱引用）：bridge 必须挂在
+    # 按钮对象上，否则局部引用消失后点击静默失效（2026-10-26 现场实测踩坑）。
+    btn._portalkit_bridge = bridge  # noqa: B010 — pyobjc 允许挂 Python 属性
     btn.setTarget_(bridge)
     btn.setAction_("call:")
     return btn
