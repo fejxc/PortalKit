@@ -54,3 +54,8 @@ class NetworkMonitor:
         current = self.current_generation()
         if current != generation:
             raise GenerationStale(generation, current)
+
+    def request_cancel(self) -> None:
+        """外部取消：立即递增 generation，使在途任务在下一个边界失效。"""
+        with self._lock:
+            self._generation += 1

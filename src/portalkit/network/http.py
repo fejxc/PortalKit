@@ -339,6 +339,7 @@ class BoundHTTPClient:
                 text=text,
                 headers=resp_headers,
                 elapsed_ms=int((time.monotonic() - started) * 1000),
+                peer_cert_sha256=self.cert_sink.get("peer_cert_sha256"),
             )
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)

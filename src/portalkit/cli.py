@@ -162,6 +162,29 @@ def cmd_adapters(args) -> int:
     return _EXIT_OK
 
 
+def cmd_ui(args) -> int:
+    """启动菜单栏宿主（前台；登录自启见 portalkit startup install）。"""
+    from portalkit.ui.menubar import main as ui_main
+
+    return ui_main()
+
+
+def cmd_startup(args) -> int:
+    from portalkit.ui import launchagent
+
+    if args.action == "install":
+        ok = launchagent.install()
+        print("登录启动已安装并拉起菜单栏。" if ok else
+              "已写入 LaunchAgent，但 launchctl 拉起失败；查看 ~/Library/Logs/portalkit-ui.log")
+        return _EXIT_OK if ok else _EXIT_ERROR
+    if args.action == "uninstall":
+        launchagent.uninstall()
+        print("登录启动已移除。")
+        return _EXIT_OK
+    print(f"状态: {launchagent.status()}  ({launchagent.plist_path()})")
+    return _EXIT_OK
+
+
 # -------------------------------------------------------------- trust 管理
 
 def cmd_trust_list(args) -> int:
@@ -351,6 +374,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_diagnostics)
 
     add("adapters", help="列出已注册适配器").set_defaults(func=cmd_adapters)
+
+    add("ui", help="启动菜单栏宿主").set_defaults(func=cmd_ui)
+
+    startup = add("startup", help="登录启动管理")
+    startup_sub = startup.add_subparsers(dest="action", required=True)
+    startup_sub.add_parser("install", parents=[common]).set_defaults(func=cmd_startup)
+    startup_sub.add_parser("uninstall", parents=[common]).set_defaults(func=cmd_startup)
+    startup_sub.add_parser("status", parents=[common]).set_defaults(func=cmd_startup)
 
     trust = sub.add_parser("trust", help="信任目标管理", parents=[common])
     trust_sub = trust.add_subparsers(dest="subcommand", required=True)

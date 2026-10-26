@@ -7,6 +7,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+ui = ["rumps>=0.4.0", "pyobjc-framework-SystemConfiguration>=10"]
 
 [project.scripts]
 portalkit = "portalkit.cli:main"

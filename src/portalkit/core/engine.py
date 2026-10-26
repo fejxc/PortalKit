@@ -83,6 +83,24 @@ class Engine:
         """完整认证流。前置：目标已信任 + Keychain 有凭据，否则转 WAITING_USER。"""
         return self._run(allow_auth=True)
 
+    def auto_run(self) -> StateSnapshot:
+        """宿主调度入口（菜单栏 / launchd）：检查 → 若发现已信任门户则自动认证。
+
+        策略归属 core（UI 不得自建第二套调度语义）：
+        - 已验证在线 → 保持 ONLINE_NO_AUTH，不重复提交（A03）；
+        - 未信任门户 → TRUST_REQUIRED，不提交（A07）；
+        - 已信任门户且未在线 → 完整认证 + 物理验证。
+        """
+        checked = self._run(allow_auth=False)
+        if checked.phase == Phase.MATCHING:
+            return self._run(allow_auth=True)
+        return checked
+
+    def request_cancel(self) -> None:
+        """请求取消当前任务：立即推进 network_generation，在途步骤在
+        下一个 check_generation 边界抛 GenerationStale → CANCELLED。"""
+        self._monitor.request_cancel()
+
     def detect(self) -> DetectionReport:
         """独立识别（trust add 用），不改状态、不提交凭据。"""
         snap = self._monitor.current_snapshot()

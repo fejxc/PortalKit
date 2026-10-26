@@ -50,6 +50,11 @@ class FakeMonitor:
         self.gen_calls += 1
         if self.stale_on_call is not None and self.gen_calls >= self.stale_on_call:
             raise GenerationStale(gen, self._generation + 1)
+        if gen != self._generation:
+            raise GenerationStale(gen, self._generation)
+
+    def request_cancel(self) -> None:
+        self._generation += 1
 
     def has_changed_since(self, gen: int) -> bool:
         return gen != self._generation
@@ -293,3 +298,53 @@ def test_generation_change_cancels_running_task(monkeypatch, tmp_path):
     state = engine.authenticate()
     assert state.phase == Phase.CANCELLED
     assert state.error_code == ErrorCode.CANCELLED
+
+
+def test_request_cancel_bumps_generation(monkeypatch, tmp_path):
+    """菜单栏"取消当前任务"：立即递增 generation，在途步骤失效。"""
+    monitor = FakeMonitor(_snapshot())
+    gen_before = monitor.current_generation()
+    engine = _engine(monkeypatch, tmp_path, monitor, FakeAdapter(), [])
+    engine.request_cancel()
+    assert monitor.current_generation() == gen_before + 1
+    with pytest.raises(GenerationStale):
+        monitor.check_generation(gen_before)
+
+
+def test_auto_run_online_never_authenticates(monkeypatch, tmp_path):
+    """auto_run：已验证在线 → 不触发认证（A03 语义）。"""
+    adapter = FakeAdapter()
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.REACHABLE)],
+                     creds=Credentials("u", "p"))
+    state = engine.auto_run()
+    assert state.phase == Phase.ONLINE_NO_AUTH
+    assert adapter.auth_calls == 0
+
+
+def test_auto_run_trusted_portal_authenticates_and_verifies(monkeypatch, tmp_path):
+    """auto_run：已信任门户且未在线 → 认证 + 物理验证。"""
+    adapter = FakeAdapter(auth_results=[AuthResult(AuthCode.SUCCESS, "ok")])
+    engine = _engine(
+        monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+        [_internet(InternetState.BLOCKED),   # 第一次 check
+         _internet(InternetState.BLOCKED),   # authenticate 流程内探测
+         _internet(InternetState.REACHABLE)],  # 认证后物理验证
+        creds=Credentials("u", "p"),
+    )
+    state = engine.auto_run()
+    assert state.phase == Phase.ONLINE_AUTHENTICATED
+    assert adapter.auth_calls == 1
+    assert adapter.verify_calls == 1
+
+
+def test_auto_run_untrusted_stops_before_credentials(monkeypatch, tmp_path):
+    """auto_run：未信任门户 → 只到 TRUST_REQUIRED，0 次凭据提交。"""
+    adapter = FakeAdapter()
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.BLOCKED)],
+                     creds=Credentials("u", "p"))
+    engine._trust = TrustRegistry(tmp_path / "empty")  # 无信任记录
+    state = engine.auto_run()
+    assert state.phase == Phase.TRUST_REQUIRED
+    assert adapter.auth_calls == 0

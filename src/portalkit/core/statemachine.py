@@ -26,6 +26,7 @@ ALLOWED_TRANSITIONS: dict[Phase, frozenset[Phase]] = {
             Phase.ONLINE_NO_AUTH,
             Phase.TRUST_REQUIRED,
             Phase.AUTHENTICATING,
+            Phase.VERIFYING,  # 会话已有效（门户 404/success.jsp）时跳过提交直接物理验证
             Phase.WAITING_USER,
             Phase.ERROR,
             Phase.CANCELLED,
@@ -34,6 +35,7 @@ ALLOWED_TRANSITIONS: dict[Phase, frozenset[Phase]] = {
     Phase.TRUST_REQUIRED: frozenset(
         {
             Phase.AUTHENTICATING,
+            Phase.VERIFYING,  # 已信任 + 会话有效场景的物理验证
             Phase.WAITING_USER,
             Phase.PROBING,
             Phase.CANCELLED,
