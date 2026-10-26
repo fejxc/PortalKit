@@ -16,7 +16,9 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from portalkit.adapters import default_registry
@@ -183,6 +185,27 @@ def cmd_startup(args) -> int:
         return _EXIT_OK
     print(f"状态: {launchagent.status()}  ({launchagent.plist_path()})")
     return _EXIT_OK
+
+
+def cmd_app(args) -> int:
+    if args.action == "install":
+        from portalkit.ui.appbundle import build_bundle, bundle_path
+
+        path = build_bundle(sys.executable)
+        print(f"已创建应用: {path}")
+        print("双击启动，或：open -a PortalKit")
+        return _EXIT_OK
+    if args.action == "open":
+        from portalkit.ui.appbundle import bundle_path
+
+        path = bundle_path(Path(args.install_dir) if args.install_dir else None)
+        if not path.exists():
+            print(f"未找到 {path}；先运行 portalkit app install", file=sys.stderr)
+            return _EXIT_ACTION_REQUIRED
+        subprocess.run(["open", str(path)], check=False)
+        return _EXIT_OK
+    print("用法: portalkit app install | app open", file=sys.stderr)
+    return _EXIT_INTERNAL
 
 
 # -------------------------------------------------------------- trust 管理
@@ -382,6 +405,13 @@ def build_parser() -> argparse.ArgumentParser:
     startup_sub.add_parser("install", parents=[common]).set_defaults(func=cmd_startup)
     startup_sub.add_parser("uninstall", parents=[common]).set_defaults(func=cmd_startup)
     startup_sub.add_parser("status", parents=[common]).set_defaults(func=cmd_startup)
+
+    app_p = add("app", help="本地 PortalKit.app（双击启动）管理")
+    app_sub = app_p.add_subparsers(dest="action", required=True)
+    app_sub.add_parser("install", parents=[common]).set_defaults(func=cmd_app)
+    p = app_sub.add_parser("open", parents=[common], help="启动已安装的 PortalKit.app")
+    p.add_argument("--install-dir", help=argparse.SUPPRESS)
+    p.set_defaults(func=cmd_app)
 
     trust = sub.add_parser("trust", help="信任目标管理", parents=[common])
     trust_sub = trust.add_subparsers(dest="subcommand", required=True)

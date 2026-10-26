@@ -101,6 +101,9 @@ class _ActionBridge(NSObject):
             print(f"[portalkit-ui] action error: {type(exc).__name__}: {exc}", flush=True)
 
 
+_ACTION_BRIDGES: list = []  # 持有全部 action bridge：NSControl target 弱引用 + pyobjc 不允许挂属性
+
+
 def _button(frame, title: str, callback: Callable[[], None]) -> NSButton:
     from AppKit import NSMomentaryPushInButton, NSRoundedBezelStyle
 
@@ -109,9 +112,10 @@ def _button(frame, title: str, callback: Callable[[], None]) -> NSButton:
     btn.setButtonType_(NSMomentaryPushInButton)
     btn.setBezelStyle_(NSRoundedBezelStyle)
     bridge = _ActionBridge.alloc().initWithCallback_(callback)
-    # NSControl 的 target 是 unsafe_unretained（弱引用）：bridge 必须挂在
-    # 按钮对象上，否则局部引用消失后点击静默失效（2026-10-26 现场实测踩坑）。
-    btn._portalkit_bridge = bridge  # noqa: B010 — pyobjc 允许挂 Python 属性
+    # NSControl 的 target 是 unsafe_unretained（弱引用），且 pyobjc 不允许在
+    # NSButton 实例上挂 Python 属性——bridge 由模块级列表持有（数量=按钮数，
+    # 生命周期=进程）。缺它则点击静默失效（2026-10-26 现场实测踩坑）。
+    _ACTION_BRIDGES.append(bridge)
     btn.setTarget_(bridge)
     btn.setAction_("call:")
     return btn
@@ -176,7 +180,7 @@ class OnboardingWindow:
         c.addSubview_(_label(NSMakeRect(20, 388, 300, 24), "发现认证网络", bold=True, size=TITLE_FONT))
         self.summary, self.summary_tv = _textview(NSMakeRect(20, 218, 420, 160))
         c.addSubview_(self.summary)
-        self.agree = _checkbox(NSMakeRect(20, 190, 420, 22), "我确认信任以上登录目标")
+        self.agree = _checkbox(NSMakeRect(20, 190, 420, 22), "我确认信任以上登录目标", False)
         c.addSubview_(self.agree)
         c.addSubview_(_label(NSMakeRect(20, 160, 60, 22), "账号"))
         self.username = _input(NSMakeRect(90, 158, 350, 24), "读者证号 / 学工号")
@@ -184,10 +188,10 @@ class OnboardingWindow:
         c.addSubview_(_label(NSMakeRect(20, 128, 60, 22), "密码"))
         self.password = _input(NSMakeRect(90, 126, 350, 24), "密码（不回显）", secure=True)
         c.addSubview_(self.password)
-        self.save_keychain = _checkbox(NSMakeRect(20, 98, 420, 22), "保存到 macOS Keychain（用于本网络自动认证）")
+        self.save_keychain = _checkbox(NSMakeRect(20, 98, 420, 22), "保存到 macOS Keychain（用于本网络自动认证）", True)
         self.save_keychain.setState_(NSControlStateValueOn)
         c.addSubview_(self.save_keychain)
-        self.auto = _checkbox(NSMakeRect(20, 74, 420, 22), "以后在此网络自动认证")
+        self.auto = _checkbox(NSMakeRect(20, 74, 420, 22), "以后在此网络自动认证", True)
         self.auto.setState_(NSControlStateValueOn)
         c.addSubview_(self.auto)
         c.addSubview_(_button(NSMakeRect(290, 24, 150, 32), "保存并认证", self._confirm))
