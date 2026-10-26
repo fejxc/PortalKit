@@ -43,12 +43,43 @@ def build_info_plist() -> dict:
     }
 
 
-def _launcher_script(python_exe: str, log_file: Path) -> str:
-    return (
-        "#!/bin/sh\n"
-        "# PortalKit 本地启动器：钉死 venv 解释器，日志与 launchd 版共用。\n"
-        f'exec "{python_exe}" -m portalkit.ui.menubar >> "{log_file}" 2>&1\n'
+_LAUNCHER_C = """#include <unistd.h>
+#include <stdio.h>
+int main(void) {{
+    freopen("{log}", "a", stdout);
+    freopen("{log}", "a", stderr);
+    execl("{python}", "PortalKit", "-m", "portalkit.ui.menubar", (char *)0);
+    return 1;
+}}
+"""
+
+
+def _write_launcher(macos_dir: Path, python_exe: str, log_file: Path) -> None:
+    """编译原生启动器替代 shell 脚本。
+
+    用 shell 脚本时进程归属退化为解释器：Dock 露出 Python 火箭、
+    Keychain/悬停提示署名 "Python"。二进制 + argv[0]="PortalKit" +
+    bundle ad-hoc 签名让系统把它当作真正的 PortalKit 应用。
+    """
+    src = macos_dir / "_launcher.c"
+    binary = macos_dir / APP_NAME
+    src.write_text(
+        _LAUNCHER_C.format(python=python_exe, log=log_file), encoding="utf-8"
     )
+    subprocess.run(
+        ["clang", "-O2", "-o", str(binary), str(src)],
+        capture_output=True, text=True, check=True,
+    )
+    src.unlink(missing_ok=True)
+    binary.chmod(0o755)
+
+
+def _adhoc_sign(bundle_root: Path) -> bool:
+    proc = subprocess.run(
+        ["codesign", "--force", "--deep", "--sign", "-", str(bundle_root)],
+        capture_output=True, text=True, check=False,
+    )
+    return proc.returncode == 0
 
 
 def _make_icns(source_png: Path, out_icns: Path, tmp_dir: Path) -> bool:
@@ -101,7 +132,6 @@ def build_bundle(python_exe: str, install_dir: Path | None = None,
             info["CFBundleIconFile"] = "AppIcon"
 
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
-    launcher = macos_dir / APP_NAME
-    launcher.write_text(_launcher_script(python_exe, log), encoding="utf-8")
-    launcher.chmod(0o755)
+    _write_launcher(macos_dir, python_exe, log)
+    _adhoc_sign(root)
     return root
