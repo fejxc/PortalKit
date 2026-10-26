@@ -52,15 +52,22 @@ def _launcher_script(python_exe: str, log_file: Path) -> str:
 
 
 def _make_icns(source_png: Path, out_icns: Path, tmp_dir: Path) -> bool:
-    """用 sips + iconutil 从状态图标生成 icns；任一环节失败返回 False。"""
+    """用 sips + iconutil 从源 PNG 生成全套 icns；任一环节失败返回 False。"""
     try:
         iconset = tmp_dir / "AppIcon.iconset"
         iconset.mkdir(parents=True, exist_ok=True)
-        for size in (16, 32, 128, 256, 512):
-            target = iconset / f"icon_{size}x{size}.png"
+        # Apple iconset 规范：基础尺寸 + @2x 变体
+        variants = [
+            ("icon_16x16.png", 16), ("icon_16x16@2x.png", 32),
+            ("icon_32x32.png", 32), ("icon_32x32@2x.png", 64),
+            ("icon_128x128.png", 128), ("icon_128x128@2x.png", 256),
+            ("icon_256x256.png", 256), ("icon_256x256@2x.png", 512),
+            ("icon_512x512.png", 512), ("icon_512x512@2x.png", 1024),
+        ]
+        for name, size in variants:
             subprocess.run(
                 ["sips", "-z", str(size), str(size), str(source_png),
-                 "--out", str(target)],
+                 "--out", str(iconset / name)],
                 capture_output=True, check=True,
             )
         subprocess.run(
@@ -85,7 +92,9 @@ def build_bundle(python_exe: str, install_dir: Path | None = None,
     log = log_file or Path.home() / "Library/Logs/portalkit-ui.log"
 
     icons_dir = icons_dir or (Path.home() / "Library/Application Support/PortalKit/icons")
-    source_icon = icons_dir / "status-ok.png"
+    # 优先用仓库内的正式 App 图标（用户提供的设计稿），回退到状态图标放大
+    asset = Path(__file__).resolve().parents[3] / "assets" / "appicon.png"
+    source_icon = asset if asset.exists() else icons_dir / "status-ok.png"
     if source_icon.exists():
         icns = resources_dir / "AppIcon.icns"
         if _make_icns(source_icon, icns, contents):
