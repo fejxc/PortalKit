@@ -392,6 +392,50 @@ def test_auto_run_untrusted_stops_before_credentials(monkeypatch, tmp_path):
     assert adapter.auth_calls == 0
 
 
+def test_auto_run_respects_per_network_auto_off(monkeypatch, tmp_path):
+    """F13：该网络 auto_auth=False → auto_run 止步 MATCHING；显式 authenticate 不受限。"""
+    adapter = FakeAdapter(auth_results=[AuthResult(AuthCode.SUCCESS, "ok")])
+    engine = _engine(
+        monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+        [_internet(InternetState.BLOCKED),   # auto_run: check 探测
+         _internet(InternetState.BLOCKED),   # auto_run: 二段(被 F13 门禁拦回 MATCHING)
+         _internet(InternetState.BLOCKED),   # authenticate(显式): 探测
+         _internet(InternetState.REACHABLE)],  # 显式认证后物理验证
+        creds=Credentials("u", "p"),
+    )
+    engine._trust.update_auto_auth("fake", "portal.example", False)
+
+    state = engine.auto_run()
+    assert state.phase == Phase.MATCHING
+    assert adapter.auth_calls == 0
+    assert "已关闭自动认证" in state.detail
+
+    state = engine.authenticate()  # 显式请求不受按网络开关限制
+    assert state.phase == Phase.ONLINE_AUTHENTICATED
+    assert adapter.auth_calls == 1
+
+
+def test_session_expiry_persisted_from_keepalive(monkeypatch, tmp_path):
+    """认证结果带 keepalive → 持久化到期估计（留换算余量断言）。"""
+    from datetime import datetime, timedelta, timezone
+
+    adapter = FakeAdapter(auth_results=[
+        AuthResult(AuthCode.SUCCESS, "ok", keepalive_minutes=1440),
+    ])
+    engine = _engine(
+        monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+        [_internet(InternetState.BLOCKED), _internet(InternetState.REACHABLE)],
+        creds=Credentials("u", "p"),
+    )
+    state = engine.authenticate()
+    assert state.phase == Phase.ONLINE_AUTHENTICATED
+    stored = engine.session_expires_at()
+    assert stored is not None
+    expiry = datetime.fromisoformat(stored)
+    remaining = expiry - datetime.now(timezone.utc)
+    assert timedelta(hours=23) < remaining <= timedelta(hours=24)
+
+
 def test_refresh_online_does_not_touch_portal(monkeypatch, tmp_path):
     adapter = FakeAdapter()
     engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,

@@ -12,6 +12,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Protocol
 
@@ -93,12 +94,21 @@ class Engine:
         策略归属 core（UI 不得自建第二套调度语义）：
         - 已验证在线 → 保持 ONLINE_NO_AUTH，不重复提交（A03）；
         - 未信任门户 → TRUST_REQUIRED，不提交（A07）；
+        - 该网络 auto_auth=False → 止步 MATCHING，等待显式 authenticate（F13）；
         - 已信任门户且未在线 → 完整认证 + 物理验证。
         """
-        checked = self._run(allow_auth=False)
+        checked = self._run(allow_auth=False, auto=True)
         if checked.phase == Phase.MATCHING:
-            return self._run(allow_auth=True)
+            return self._run(allow_auth=True, auto=True)
         return checked
+
+    def session_expires_at(self) -> str | None:
+        """最近一次认证成功的会话预计到期时间（ISO；门户未提供 keepalive 时为 None）。"""
+        try:
+            data = json.loads((self._state_dir / "state.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data.get("session_expires_at")
 
     def request_cancel(self) -> None:
         """请求取消当前任务：立即推进 network_generation，在途步骤在
@@ -172,7 +182,7 @@ class Engine:
 
     _last_phase: Phase = Phase.IDLE  # 引擎级记忆，仅用于转移合法性自检
 
-    def _run(self, *, allow_auth: bool, refresh: bool = False) -> StateSnapshot:
+    def _run(self, *, allow_auth: bool, refresh: bool = False, auto: bool = False) -> StateSnapshot:
         if not self._lock.acquire(blocking=False):
             snap = self._monitor.current_snapshot()
             return self._state(
@@ -276,6 +286,16 @@ class Engine:
                 if recovery.code != AuthCode.SUCCESS:
                     return self._auth_failure(snap, generation, matched.adapter_id, recovery, internet)
 
+            if auto and not record.auto_auth:
+                # F13：此网络已关闭自动认证——止步 MATCHING，等显式 authenticate。
+                return self._finish(self._state(
+                    snap, generation, link=LinkState.READY,
+                    portal=PortalState.DETECTED, internet=internet.state,
+                    phase=Phase.MATCHING, adapter_id=matched.adapter_id,
+                    detail=f"已识别 {matched_adapter.name} 门户（此网络已关闭自动认证，可点「立即认证」手动执行）",
+                    evidence=matched.evidence,
+                ))
+
             if matched.already_authenticated and not allow_auth:
                 # check 场景：门户报会话有效 → 只做物理验证，不提交。
                 # authenticate 场景不采用该捷径——物理路径已知不通时
@@ -331,6 +351,14 @@ class Engine:
                     snap, generation, matched_adapter, internet_state=internet.state, already=True,
                 )
             if auth.code == AuthCode.SUCCESS:
+                if auth.keepalive_minutes:
+                    # 会话到期估计 = 现在 + keepalive（调度侧再留余量）。
+                    self._pending_session_expiry = (
+                        datetime.now(timezone.utc) + timedelta(minutes=auth.keepalive_minutes)
+                    ).isoformat(timespec="seconds")
+                    self._log.event("session_expiry_estimated",
+                                    adapter=matched.adapter_id,
+                                    keepalive_minutes=auth.keepalive_minutes)
                 return self._verify(
                     snap, generation, matched_adapter, internet_state=internet.state, already=False,
                 )
@@ -435,6 +463,14 @@ class Engine:
     def _persist(self, state: StateSnapshot) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         path = self._state_dir / "state.json"
+        payload = state.to_dict()
+        # 会话到期估计：仅当最近一次认证结果带 keepalive 数据时更新，否则保留
+        # 旧值（会话可能仍然有效）；离线/失败状态不擦除它。
+        expires = self._pending_session_expiry
+        if expires is not None or "session_expires_at" not in payload:
+            payload["session_expires_at"] = expires
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(state.to_dict(), fh, ensure_ascii=False, indent=2)
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+    _pending_session_expiry: str | None = None

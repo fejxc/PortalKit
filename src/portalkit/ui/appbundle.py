@@ -50,6 +50,12 @@ def build_standalone(install_dir: Path | None = None) -> Path:
     icns = build_dir / "appicon.icns"
     if not _make_icns(project_root / "assets" / "appicon.png", icns, build_dir):
         raise RuntimeError("AppIcon.icns 生成失败")
+    # 版本与发布脚本同源：pyproject.toml（spec 经 PORTALKIT_VERSION 读取）
+    import tomllib
+
+    version = tomllib.loads(
+        (project_root / "pyproject.toml").read_text(encoding="utf-8")
+    )["project"]["version"]
     subprocess.run(
         [
             sys.executable, "-m", "PyInstaller", "--clean", "-y",
@@ -58,6 +64,7 @@ def build_standalone(install_dir: Path | None = None) -> Path:
             "--workpath", str(build_dir / "work"),
         ],
         check=True,
+        env={**os.environ, "PORTALKIT_VERSION": version},
     )
     staged = build_dir / "dist" / f"{APP_NAME}.app"
     info_path = staged / "Contents" / "Info.plist"

@@ -15,6 +15,7 @@ from AppKit import (
     NSAlert,
     NSAlertFirstButtonReturn,
     NSBackingStoreBuffered,
+    NSBox,
     NSButton,
     NSControlStateValueOff,
     NSControlStateValueOn,
@@ -158,6 +159,7 @@ def _record_detail(rec: TrustRecord) -> str:
         f"适配器:   {rec.adapter_id}",
         f"认证目标: {rec.scheme}://{rec.portal_host}:{rec.portal_port}",
         f"允许宿主: {', '.join(rec.allowed_hosts)}",
+        f"自动认证: {'开启' if rec.auto_auth else '关闭'}",
         f"页面指纹: {rec.fingerprint or '未固定'}",
         f"证书指纹: {rec.cert_sha256 or '未固定'}",
         f"信任时间: {rec.created_at or '未知'}",
@@ -356,13 +358,18 @@ class CredentialsWindow:
 class ManagerWindow:
     def __init__(self, ctx: "UIContext") -> None:
         self.ctx = ctx
-        self.win = _window("PortalKit — 管理可信网络", 460, 320)
+        self.win = _window("PortalKit — 管理可信网络", 460, 352)
         c = self.win.contentView()
-        c.addSubview_(_label(NSMakeRect(20, 278, 380, 22), "受信网络", bold=True))
-        self.popup = _popup(NSMakeRect(20, 248, 420, 26), [])
+        c.addSubview_(_label(NSMakeRect(20, 310, 380, 22), "受信网络", bold=True))
+        self.popup = _popup(NSMakeRect(20, 280, 420, 26), [])
         c.addSubview_(self.popup)
-        self.detail, self.detail_tv = _textview(NSMakeRect(20, 78, 420, 160))
+        self.detail, self.detail_tv = _textview(NSMakeRect(20, 118, 420, 152))
         c.addSubview_(self.detail)
+        self.auto_toggle = _checkbox(NSMakeRect(20, 88, 420, 22), "此网络自动认证", True)
+        c.addSubview_(self.auto_toggle)
+        self._auto_bridge = _ActionBridge.alloc().initWithCallback_(self._auto_changed)
+        self.auto_toggle.setTarget_(self._auto_bridge)
+        self.auto_toggle.setAction_("call:")
         c.addSubview_(_button(NSMakeRect(20, 28, 120, 32), "撤销信任", self._revoke))
         c.addSubview_(_button(NSMakeRect(160, 28, 120, 32), "编辑凭据", self._edit_creds))
         c.addSubview_(_button(NSMakeRect(320, 28, 120, 32), "刷新", self.refresh))
@@ -381,6 +388,19 @@ class ManagerWindow:
     def _picked(self) -> None:
         rec = self._selected()
         self.detail_tv.setString_(_record_detail(rec) if rec else "（无受信网络）")
+        self.auto_toggle.setState_(
+            NSControlStateValueOn if (rec and rec.auto_auth) else NSControlStateValueOff
+        )
+
+    def _auto_changed(self) -> None:
+        rec = self._selected()
+        if rec is None:
+            return
+        enabled = self.auto_toggle.state() == NSControlStateValueOn
+        if enabled != rec.auto_auth:
+            self.ctx.trust.update_auto_auth(rec.adapter_id, rec.portal_host, enabled)
+            self.ctx.logger.event("auto_auth_toggled", adapter=rec.adapter_id,
+                                  host=rec.portal_host, enabled=enabled)
 
     def refresh(self) -> None:
         records = self._records()
@@ -421,9 +441,15 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
     lines = ["== PortalKit 诊断（脱敏） ==", ""]
     snap = ctx.engine_latest_snapshot()
     if snap and snap.ready:
-        lines.append(f"物理网络: {snap.interface}  IP: {snap.ipv4}  网关: {snap.gateway}")
+        label = f"{snap.ssid}" if snap.ssid else f"{snap.gateway or '-'} · {snap.interface}"
+        lines.append(f"物理网络: {label}  IP: {snap.ipv4}  接口: {snap.interface}")
     else:
         lines.append("物理网络: 未连接")
+    expiry = None
+    if ctx.engine is not None:
+        expiry = ctx.engine.session_expires_at()
+    if expiry:
+        lines.append(f"会话预计有效至: {expiry}")
     if state:
         lines += [
             "",
@@ -450,20 +476,89 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
     return "\n".join(lines)
 
 
+def _health_summary(ctx: "UIContext") -> tuple[str, str, str]:
+    """三维健康卡的一句话摘要：(物理链路, 门户认证, 互联网可达)。"""
+    state = ctx.engine_latest_state()
+    snap = ctx.engine_latest_snapshot()
+    if state is None:
+        return ("未知", "未知", "未知")
+    link_word = {
+        "READY": "已就绪", "DISCONNECTED": "未连接",
+        "CONFIGURING": "配置中", "ERROR": "错误",
+    }.get(state.link.value, "未知")
+    portal_word = {
+        "AUTHENTICATED": "已通过", "NOT_REQUIRED": "无需认证",
+        "AUTHENTICATING": "进行中", "TRUST_PENDING": "待确认",
+        "DETECTED": "待确认", "INTERACTION_REQUIRED": "需人工",
+        "FAILED": "失败",
+    }.get(state.portal.value, "未知")
+    internet_word = {
+        "REACHABLE": "已通过", "CHECKING": "检查中",
+        "BLOCKED": "未通过", "ERROR": "错误",
+    }.get(state.internet.value, "未知")
+    if snap is None or not snap.ready:
+        link_word = "未连接"
+    return (link_word, portal_word, internet_word)
+
+
+def _health_payload(ctx: "UIContext") -> str:
+    """复制到剪贴板的脱敏诊断 JSON（状态 + 快照 + 最近事件摘要）。"""
+    state = ctx.engine_latest_state()
+    snap = ctx.engine_latest_snapshot()
+    events: list[dict] = []
+    events_path = ctx.state_dir / "events.jsonl"
+    if events_path.exists():
+        for line in events_path.read_text(encoding="utf-8").splitlines()[-15:]:
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+    payload = {
+        "state": state.to_dict() if state else None,
+        "network": snap.to_dict() if snap else None,
+        "session_expires_at": (ctx.engine.session_expires_at() if ctx.engine else None),
+        "recent_events": events,
+    }
+    return redact_text(json.dumps(payload, ensure_ascii=False, indent=2), max_len=200_000)
+
+
 class DiagnosticsWindow:
     def __init__(self, ctx: "UIContext") -> None:
         self.ctx = ctx
-        self.win = _window("PortalKit — 诊断与日志", 560, 420)
+        self.win = _window("PortalKit — 诊断与日志", 560, 470)
         c = self.win.contentView()
-        self.text, self.tv = _textview(NSMakeRect(20, 62, 520, 340))
+        # 三维健康卡（UI_UX_SPEC §7：三项检查卡，不用单一红绿）
+        self.cards: list = []
+        for index, title in enumerate(("物理链路", "门户认证", "互联网可达")):
+            box = NSBox.alloc().initWithFrame_(
+                NSMakeRect(20 + index * 178, 408, 164, 52)
+            )
+            box.setTitle_(title)
+            value = _label(NSMakeRect(8, 0, 148, 18), "未知")
+            box.setContentView_(value)
+            c.addSubview_(box)
+            self.cards.append(value)
+        self.text, self.tv = _textview(NSMakeRect(20, 62, 520, 334))
         c.addSubview_(self.text)
         c.addSubview_(_button(NSMakeRect(20, 18, 110, 32), "重新检查", self.ctx.request_check))
         c.addSubview_(_button(NSMakeRect(150, 18, 90, 32), "刷新", self.refresh))
+        c.addSubview_(_button(NSMakeRect(260, 18, 130, 32), "复制诊断信息", self._copy))
         c.addSubview_(_button(NSMakeRect(430, 18, 110, 32), "导出脱敏诊断", self._export))
         self.refresh()
 
     def refresh(self) -> None:
         self.tv.setString_(_diagnostics_text(self.ctx))
+        for label, word in zip(self.cards, _health_summary(self.ctx)):
+            label.setStringValue_(word)
+
+    def _copy(self) -> None:
+        from AppKit import NSPasteboard
+
+        text = _health_payload(self.ctx)
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(text, "public.utf8-plain-text")
+        _confirm("已复制", "脱敏诊断 JSON 已复制到剪贴板。", "好")
 
     def show(self) -> None:
         self.refresh()

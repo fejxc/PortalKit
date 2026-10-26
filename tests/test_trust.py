@@ -56,3 +56,14 @@ def test_unobserved_signature_does_not_break_trust(tmp_path):
     registry = TrustRegistry(tmp_path)
     record = registry.add(_record())
     assert registry.signature_matches(record, None, None)
+
+
+def test_auto_auth_toggle_persists(tmp_path):
+    """F13：按网络自动认证开关，持久化回读 + 旧记录缺省视为开启。"""
+    registry = TrustRegistry(tmp_path)
+    registry.add(_record())
+    updated = registry.update_auto_auth("zjlib", "2.2.1.1", False)
+    assert updated is not None and updated.auto_auth is False
+    reloaded = TrustRegistry(tmp_path).lookup("zjlib", "2.2.1.1")
+    assert reloaded is not None and reloaded.auto_auth is False
+    assert registry.update_auto_auth("zjlib", "missing-host", True) is None

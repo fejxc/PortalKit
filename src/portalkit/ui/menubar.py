@@ -17,6 +17,7 @@ import subprocess
 import threading
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -54,7 +55,7 @@ from portalkit.core.settings import Settings, SettingsStore
 from portalkit.core.trust import TrustRegistry
 from portalkit.credentials.service import KeychainCredentialService
 from portalkit.models import ErrorCode, Phase, StateSnapshot
-from portalkit.network.interfaces import NetworkSnapshot
+from portalkit.network.interfaces import NetworkSnapshot, network_label
 from portalkit.network.monitor import NetworkMonitor
 from portalkit.network.scmonitor import SCNetworkListener
 from portalkit.ui.icons import ensure_icons, icon_for_state
@@ -70,6 +71,19 @@ _IN_FLIGHT = {
     Phase.PROBING, Phase.MATCHING, Phase.AUTHENTICATING,
     Phase.VERIFYING, Phase.RETRY_BACKOFF,
 }
+
+
+def _confirm_update_box(title: str, info: str, ok: str, open_url: str | None = None) -> None:
+    """更新检查结果弹窗（主线程回调内调用）；确认后可选打开 Releases 页。"""
+    from AppKit import NSAlert, NSAlertFirstButtonReturn, NSURL, NSWorkspace
+
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_(title)
+    alert.setInformativeText_(info)
+    alert.addButtonWithTitle_(ok)
+    alert.addButtonWithTitle_("取消")
+    if alert.runModal() == NSAlertFirstButtonReturn and open_url:
+        NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(open_url))
 
 _TAG_BY_PHASE = {
     Phase.ONLINE_AUTHENTICATED: "已联网",
@@ -154,7 +168,7 @@ class EngineWorker(threading.Thread):
         self._set_busy(False)
         listener = SCNetworkListener(on_change=lambda: self.submit("network"))
         self.sc_events = listener.start()
-        next_fallback = time.monotonic() + self.settings.get().check_interval_s
+        next_fallback = time.monotonic() + self._next_fallback_delay()
         while True:
             timeout = max(0.5, next_fallback - time.monotonic())
             try:
@@ -167,14 +181,14 @@ class EngineWorker(threading.Thread):
             if command == "network":
                 self._debounce()
                 self._run("auto")
-                next_fallback = time.monotonic() + self.settings.get().check_interval_s
+                next_fallback = time.monotonic() + self._next_fallback_delay()
             elif command == "fallback":
                 if self.sc_events:
                     # SC 事件可用时兜底只做轻量对齐，避免与事件重复全量认证
                     self._run("check")
                 else:
                     self._run("auto")
-                next_fallback = time.monotonic() + self.settings.get().check_interval_s
+                next_fallback = time.monotonic() + self._next_fallback_delay()
             elif command == "check":
                 self._run("check")
             elif command == "detect":
@@ -187,8 +201,28 @@ class EngineWorker(threading.Thread):
                 self.engine.request_cancel()
             elif command == "settings_changed":
                 next_fallback = min(
-                    next_fallback, time.monotonic() + self.settings.get().check_interval_s
+                    next_fallback, time.monotonic() + self._next_fallback_delay()
                 )
+
+    def _next_fallback_delay(self) -> float:
+        """兜底间隔 = 设置值与会话"到期前余量窗口"取近者。
+
+        会话临近过期时提前加密检查（只加检查、不加凭据提交——是否重登
+        仍由 auto_run 的在线判定决定，遵守 A03）。
+        """
+        base = float(self.settings.get().check_interval_s)
+        expires = self.engine.session_expires_at()
+        if not expires:
+            return base
+        try:
+            expiry = datetime.fromisoformat(expires)
+        except ValueError:
+            return base
+        margin = timedelta(minutes=30)
+        seconds_to_margin = (expiry - margin - datetime.now(timezone.utc)).total_seconds()
+        if seconds_to_margin <= 0:
+            return min(base, 30.0)  # 已进入余量窗口：尽快复查（限流防打转）
+        return max(30.0, min(base, seconds_to_margin))
 
     def _debounce(self, delay: float = 1.2) -> None:
         """网络事件去抖：窗口期内的新事件并入一次处理（STATE_MODEL §3）。"""
@@ -262,6 +296,7 @@ class PortalKitApp(rumps.App):
             rumps.MenuItem("立即认证", callback=self._on_authenticate),
             rumps.MenuItem("强制刷新会话", callback=self._on_refresh_session),
             rumps.MenuItem("取消当前任务", callback=self._on_cancel),
+            rumps.MenuItem("检查更新…", callback=self._on_check_updates),
             None,
             rumps.MenuItem("添加 / 确认可信网络…", callback=self._on_onboarding),
             rumps.MenuItem("录入 / 更新凭据…", callback=self._on_credentials),
@@ -297,6 +332,23 @@ class PortalKitApp(rumps.App):
 
     def _on_refresh_session(self, _sender=None) -> None:
         self.worker.submit("refresh-session")
+
+    def _on_check_updates(self, _sender=None) -> None:
+        from portalkit import __version__
+        from portalkit.ui.updates import check_for_update
+
+        info = check_for_update(__version__)
+        if info is None:
+            _confirm_update_box("检查更新", "无法查询 GitHub Release（网络不可达或超时）。", "好")
+        elif info.has_update:
+            _confirm_update_box(
+                "发现新版本",
+                f"最新版本 {info.latest_tag}，当前 {__version__}。\n{info.url}",
+                "打开 Releases 页面",
+                open_url=info.url,
+            )
+        else:
+            _confirm_update_box("已是最新", f"当前版本 {__version__} 已是最新。", "好")
 
     def _on_cancel(self, _sender=None) -> None:
         self.worker.submit("cancel")
@@ -355,8 +407,13 @@ class PortalKitApp(rumps.App):
         tag = _TAG_BY_PHASE.get(state.phase, state.phase.value)
         self._hdr_tag.title = f"PortalKit — {tag}"
         detail = state.detail or state.message_key
-        iface = f" · {state.interface}" if state.interface else ""
-        self._hdr_detail.title = f"{detail}{iface}"[:120]
+        # 网络名：SSID 优先（定位授权时），缺省网关·接口摘要
+        label = network_label(snapshot) if snapshot else None
+        show_iface = state.interface and not (snapshot and snapshot.ssid)
+        iface = f" · {state.interface}" if show_iface else ""
+        self._hdr_detail.title = (
+            f"{label} · {detail}{iface}" if label else f"{detail}{iface}"
+        )[:140]
         if tag != self._last_rendered:
             self._last_rendered = tag
             print(f"[portalkit-ui] ui: {tag} ({state.error_code.value})", flush=True)

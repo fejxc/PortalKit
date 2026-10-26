@@ -135,6 +135,12 @@ def cmd_diagnostics(args) -> int:
     state_dir = args.state_dir or DEFAULT_STATE_DIR
     print("== PortalKit 诊断（脱敏） ==")
     cmd_status(args)
+    try:
+        last = json.loads((state_dir / "state.json").read_text(encoding="utf-8"))
+        if last.get("session_expires_at"):
+            print(f"会话预计有效至: {last['session_expires_at']}（门户 keepalive 估计）")
+    except (OSError, ValueError):
+        pass
     registry = TrustRegistry()
     records = registry.all()
     print(f"\n受信目标 {len(records)} 项:")
@@ -234,8 +240,27 @@ def cmd_trust_list(args) -> int:
     for rec in records:
         print(f"[{rec.adapter_id}] {rec.portal_host}:{rec.portal_port} ({rec.scheme})")
         print(f"  允许宿主: {', '.join(rec.allowed_hosts)}")
+        print(f"  自动认证: {'开启' if rec.auto_auth else '关闭'}")
         print(f"  页面指纹: {rec.fingerprint or '未固定'}  证书指纹: {rec.cert_sha256 or '未固定'}")
         print(f"  信任时间: {rec.created_at or '未知'}")
+    return _EXIT_OK
+
+
+def cmd_trust_auto(args) -> int:
+    registry = TrustRegistry()
+    records = [r for r in registry.all() if r.adapter_id == args.adapter]
+    if args.host:
+        records = [r for r in records if r.portal_host == args.host]
+    if not records:
+        print("没有匹配的信任记录。", file=sys.stderr)
+        return _EXIT_ACTION_REQUIRED
+    target = records[0]
+    enabled = args.value == "on"
+    updated = registry.update_auto_auth(target.adapter_id, target.portal_host, enabled)
+    if updated is None:
+        print("更新失败。", file=sys.stderr)
+        return _EXIT_ERROR
+    print(f"[{target.adapter_id}] {target.portal_host} 自动认证已{'开启' if enabled else '关闭'}。")
     return _EXIT_OK
 
 
@@ -448,6 +473,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host")
     p.add_argument("--yes", action="store_true")
     p.set_defaults(func=cmd_trust_revoke)
+    p = trust_sub.add_parser("auto", help="按网络开关自动认证（F13）", parents=[common])
+    p.add_argument("--adapter", required=True)
+    p.add_argument("--host")
+    p.add_argument("value", choices=("on", "off"))
+    p.set_defaults(func=cmd_trust_auto)
 
     creds = sub.add_parser("credentials", help="凭据管理", parents=[common])
     creds_sub = creds.add_subparsers(dest="subcommand", required=True)

@@ -28,6 +28,7 @@ class TrustRecord:
     network_hint: str = ""  # 首次确认时的网关/接口线索，仅展示用
     created_at: str = ""
     note: str = ""
+    auto_auth: bool = True  # 此网络是否自动认证（PRD F13；显式 authenticate 不受此限）
 
     @property
     def key(self) -> str:
@@ -68,6 +69,7 @@ class TrustRegistry:
                     network_hint=item.get("network_hint", ""),
                     created_at=item.get("created_at", ""),
                     note=item.get("note", ""),
+                    auto_auth=bool(item.get("auto_auth", True)),  # 旧记录缺省视为开启
                 )
                 self._records[rec.key] = rec
         except (OSError, ValueError, KeyError):
@@ -89,6 +91,17 @@ class TrustRegistry:
 
     def lookup(self, adapter_id: str, portal_host: str) -> TrustRecord | None:
         return self._records.get(f"{adapter_id}:{portal_host}")
+
+    def update_auto_auth(self, adapter_id: str, portal_host: str, enabled: bool) -> TrustRecord | None:
+        """按网络开关自动认证（PRD F13）。记录不存在返回 None。"""
+        with self._lock:
+            rec = self._records.get(f"{adapter_id}:{portal_host}")
+            if rec is None:
+                return None
+            rec = replace(rec, auto_auth=enabled)
+            self._records[rec.key] = rec
+            self._save()
+            return rec
 
     def fingerprint_matches(self, record: TrustRecord, observed: str | None) -> bool:
         """observed=None 视为"本次未能观测"，不据此否定既有信任。"""

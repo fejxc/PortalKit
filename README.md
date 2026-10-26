@@ -40,6 +40,8 @@ PortalKit 解决这两件事：
 - **信任门槛**：首次遇到门户必须显式确认目标（含证书指纹 pinning）；门户改版或证书更换 → 自动提交立即暂停
 - **门户语义独立**：每个适配器声明自己的魔法码（zjlib 的 404=已认证），绝不共用
 - **切网自动恢复**：SystemConfiguration 事件驱动（低频兜底），网络代际（generation）变化自动取消在途任务
+- **会话过期感知**：门户返回 keepalive 时持久化"预计有效至"，临近到期自动加密检查，过期第一时间自动重登
+- **按网络开关自动认证**：每个受信网络独立控制（全局设置作默认值），显式认证不受限
 - **菜单栏原生应用**：rumps/PyObjC 实现，独立打包后无需任何 Python 环境
 - **门户语义化错误**：密码错误 / 需要验证码 / 门户改版 / 临时网络故障分开报告，只有临时故障做有界退避重试
 
@@ -83,6 +85,7 @@ portalkit authenticate            # 对已信任门户认证 + 物理验证
 portalkit refresh-session         # 强制刷新门户会话（在线时安全跳过）
 portalkit diagnostics --tail 30   # 脱敏诊断摘要
 portalkit trust list|add|revoke   # 信任目标管理
+portalkit trust auto on|off       # 按网络开关自动认证
 portalkit credentials set|list|delete
 portalkit app install [--dev]     # 打包独立 .app
 portalkit startup install|status  # 登录自启（LaunchAgent）

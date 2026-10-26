@@ -88,6 +88,33 @@ def wifi_device() -> str:
     return _wifi_device()
 
 
+def wifi_ssid(iface: str) -> str | None:
+    """尽力读取 SSID（macOS 14+ `ipconfig getsummary`）。
+
+    定位权限未授权时系统会隐藏 SSID——返回 None，调用方降级为网关摘要，
+    绝不为此弹权限请求（PRD：SSID 可选）。
+    """
+    out = _run(["ipconfig", "getsummary", iface])
+    if not out:
+        return None
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("SSID") and ":" in stripped:
+            value = stripped.split(":", 1)[1].strip()
+            if value and value != "<hidden>":
+                return value
+    return None
+
+
+def network_label(snapshot: NetworkSnapshot) -> str:
+    """菜单展示用的网络名：SSID 优先，缺省降级为网关/接口摘要。"""
+    if snapshot.ssid:
+        return snapshot.ssid
+    if snapshot.gateway:
+        return f"{snapshot.gateway} · {snapshot.interface}"
+    return snapshot.interface or "未连接"
+
+
 def build_snapshot(interface: str | None = None) -> NetworkSnapshot:
     """采集一次网络快照。
 
@@ -113,5 +140,6 @@ def build_snapshot(interface: str | None = None) -> NetworkSnapshot:
         gateway = route_gw
     dns = dhcp_dns(chosen) or gateway
     return NetworkSnapshot(
-        interface=chosen, ipv4=ipv4, gateway=gateway, dns=dns
+        interface=chosen, ipv4=ipv4, gateway=gateway, dns=dns,
+        ssid=wifi_ssid(chosen),
     )

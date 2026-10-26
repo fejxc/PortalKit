@@ -41,13 +41,26 @@ def redact_text(text: str, max_len: int = 200) -> str:
 
 
 class RedactedLogger:
-    """JSON Lines 结构化日志。secret 登记后任何字段值中的出现都会被打码。"""
+    """JSON Lines 结构化日志。secret 登记后任何字段值中的出现都会被打码。
 
-    def __init__(self, sink_path: Path | None = None, echo_stderr: bool = False) -> None:
+    大小轮转：sink 超过 max_bytes 时滚动为 <sink>.1（再旧的 .2 删除），
+    防止 events.jsonl 无限增长。轮转在锁内进行，线程安全。
+    """
+
+    def __init__(
+        self,
+        sink_path: Path | None = None,
+        echo_stderr: bool = False,
+        *,
+        max_bytes: int = 5_000_000,
+        backups: int = 2,
+    ) -> None:
         self._sink = sink_path
         self._echo = echo_stderr
         self._secrets: set[str] = set()
         self._lock = threading.Lock()
+        self._max_bytes = max_bytes
+        self._backups = backups
 
     def register_secret(self, value: str) -> None:
         if value:
@@ -69,12 +82,30 @@ class RedactedLogger:
             return [self._scrub(v) for v in value]
         return value
 
+    def _rotate_if_needed(self) -> None:
+        if self._sink is None or not self._sink.exists():
+            return
+        if self._sink.stat().st_size < self._max_bytes:
+            return
+        oldest = self._sink.with_suffix(self._sink.suffix + f".{self._backups}")
+        if oldest.exists():
+            oldest.unlink()
+        for index in range(self._backups - 1, 0, -1):
+            src = self._sink.with_suffix(self._sink.suffix + f".{index}")
+            if src.exists():
+                src.rename(self._sink.with_suffix(self._sink.suffix + f".{index + 1}"))
+        self._sink.rename(self._sink.with_suffix(self._sink.suffix + ".1"))
+
     def event(self, event: str, *, level: str = "info", **fields: Any) -> None:
         record = {"ts": utc_now_iso(), "level": level, "event": event}
         record.update(self._scrub(fields))
         line = json.dumps(record, ensure_ascii=False, default=str)
         with self._lock:
             if self._sink is not None:
+                try:
+                    self._rotate_if_needed()
+                except OSError:
+                    pass  # 轮转失败不阻断事件写入
                 self._sink.parent.mkdir(parents=True, exist_ok=True)
                 with self._sink.open("a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
