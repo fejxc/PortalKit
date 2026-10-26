@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import rumps
+from Foundation import NSObject  # _WakeBridge 基类
 
 from portalkit.adapters import default_registry
 
@@ -150,6 +151,27 @@ class StateHolder:
             return self._state, self._snapshot, self._busy, self._detection
 
 
+class _WakeBridge(NSObject):
+    """系统睡眠/唤醒通知桥（NSWorkspace，主线程投递）→ 转交 worker 队列。
+
+    只依赖 NSWorkspaceDidWake/WillSleep：唤醒后立即触发检查，不再等
+    SC 事件或兜底轮询（睡眠唤醒是网络状态最不可信的时刻）。
+    """
+
+    def initWithCallback_(self, callback: Callable[[str], None]):
+        import objc
+
+        self = objc.super(_WakeBridge, self).init()
+        self.callback = callback
+        return self
+
+    def onSleep_(self, note) -> None:  # noqa: N802
+        self.callback("sleep")
+
+    def onWake_(self, note) -> None:  # noqa: N802
+        self.callback("wake")
+
+
 class EngineWorker(threading.Thread):
     """串行执行引擎命令；SC 事件在此线程去抖后调用 auto_run。"""
 
@@ -199,6 +221,16 @@ class EngineWorker(threading.Thread):
                 self._run("refresh-session")
             elif command == "cancel":
                 self.engine.request_cancel()
+            elif command == "sleep":
+                self.engine._log.event("system_sleep")  # noqa: SLF001
+                print("[portalkit-ui] system sleep", flush=True)
+                self.engine.request_cancel()  # 睡眠中在途请求必死，主动转为干净取消
+            elif command == "wake":
+                self.engine._log.event("system_wake")  # noqa: SLF001
+                print("[portalkit-ui] system wake — recheck", flush=True)
+                self._debounce()
+                self._run("auto")
+                next_fallback = time.monotonic() + self._next_fallback_delay()
             elif command == "settings_changed":
                 next_fallback = min(
                     next_fallback, time.monotonic() + self._next_fallback_delay()
@@ -316,6 +348,7 @@ class PortalKitApp(rumps.App):
         self.worker = EngineWorker(ctx.engine, ctx.settings, self._holder)
         self.worker.start()
         self.worker.submit("check")
+        self._register_sleep_wake_listener()
         self._windows: dict[str, object] = {}
         self._last_notify_key: tuple | None = None
         self._last_rendered: str | None = None
@@ -332,6 +365,26 @@ class PortalKitApp(rumps.App):
 
     def _on_refresh_session(self, _sender=None) -> None:
         self.worker.submit("refresh-session")
+
+    def _register_sleep_wake_listener(self) -> None:
+        """NSWorkspace 睡眠/唤醒通知（主线程投递）→ worker 队列。"""
+        try:
+            from AppKit import NSWorkspace
+            from Foundation import NSNotificationCenter
+
+            self._wake_bridge = _WakeBridge.alloc().initWithCallback_(
+                self.worker.submit
+            )
+            center = NSWorkspace.sharedWorkspace().notificationCenter()
+            center.addObserver_selector_name_object_(
+                self._wake_bridge, "onWake:", "NSWorkspaceDidWakeNotification", None
+            )
+            center.addObserver_selector_name_object_(
+                self._wake_bridge, "onSleep:", "NSWorkspaceWillSleepNotification", None
+            )
+            print("[portalkit-ui] sleep/wake listener armed", flush=True)
+        except Exception as exc:  # noqa: BLE001 — 监听失败降级为 SC+兜底
+            print(f"[portalkit-ui] sleep/wake listener unavailable: {exc}", flush=True)
 
     def _on_check_updates(self, _sender=None) -> None:
         from portalkit import __version__
