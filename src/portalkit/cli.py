@@ -141,6 +141,11 @@ def cmd_diagnostics(args) -> int:
             print(f"会话预计有效至: {last['session_expires_at']}（门户 keepalive 估计）")
     except (OSError, ValueError):
         pass
+    from portalkit.diagnostics.stats import LocalStats
+
+    summary = LocalStats(state_dir / "stats.json").summary_today()
+    if summary:
+        print(f"使用统计: {summary}")
     registry = TrustRegistry()
     records = registry.all()
     print(f"\n受信目标 {len(records)} 项:")

@@ -30,12 +30,17 @@ def log_path() -> Path:
 
 
 def build_plist(program_args: list[str], log_file: str) -> dict:
-    """纯函数：返回 plist 字典（ProgramArguments 由调用方决定）。"""
+    """纯函数：返回 plist 字典（ProgramArguments 由调用方决定）。
+
+    KeepAlive=SuccessfulExit:false —— 仅在**非零退出**（崩溃/异常）时自动
+    拉起，正常退出（用户点退出）保持停止；ThrottledInterval 防僵尸循环。
+    """
     return {
         "Label": LABEL,
         "ProgramArguments": program_args,
         "RunAtLoad": True,
-        "KeepAlive": False,  # 菜单栏应用崩溃不自动复活，避免僵尸循环；用户可手动重开
+        "KeepAlive": {"SuccessfulExit": False},
+        "ThrottledInterval": 10,
         "ProcessType": "Interactive",
         "StandardOutPath": log_file,
         "StandardErrorPath": log_file,

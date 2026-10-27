@@ -13,7 +13,9 @@ def test_build_plist_contents():
     assert plist["Label"] == launchagent.LABEL
     assert plist["ProgramArguments"] == args
     assert plist["RunAtLoad"] is True
-    assert plist["KeepAlive"] is False  # 菜单栏应用不自动复活
+    # 崩溃自愈：仅非零退出拉起；正常退出（0）保持停止；10s 节流防僵尸循环
+    assert plist["KeepAlive"] == {"SuccessfulExit": False}
+    assert plist["ThrottledInterval"] == 10
     data = plistlib.dumps(plist)  # 必须可被 launchd 解析
     assert b"PortalKit.app" in data
 

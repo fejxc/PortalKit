@@ -22,6 +22,7 @@ from portalkit.core.retry import RetryPolicy
 from portalkit.core.statemachine import assert_transition
 from portalkit.core.trust import TrustRegistry, TrustRecord
 from portalkit.diagnostics.logging import RedactedLogger
+from portalkit.diagnostics.stats import LocalStats
 from portalkit.models import (
     ErrorCode,
     InternetState,
@@ -64,6 +65,7 @@ class Engine:
         logger: RedactedLogger | None = None,
         retry_policy: RetryPolicy | None = None,
         state_dir: Path | None = None,
+        stats: "LocalStats | None" = None,
     ) -> None:
         self._monitor = monitor
         self._registry = registry
@@ -72,6 +74,7 @@ class Engine:
         self._log = logger or RedactedLogger()
         self._retry = retry_policy or RetryPolicy()
         self._state_dir = state_dir or DEFAULT_STATE_DIR
+        self.stats = stats or LocalStats(self._state_dir / "stats.json")
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------ public
@@ -214,6 +217,7 @@ class Engine:
                     phase=Phase.ERROR, error=ErrorCode.NETWORK_ERROR,
                     detail=f"探测失败: {type(exc).__name__}",
                 ))
+            self.stats.record_check()
             try:
                 self._monitor.check_generation(generation)
             except GenerationStale:
@@ -327,6 +331,7 @@ class Engine:
 
             # ---- 认证（单任务、有界退避，永久错误不重试）
             auth = None
+            auth_started = time.monotonic()
             for attempt in range(self._retry.attempts()):
                 try:
                     self._advance(Phase.AUTHENTICATING)
@@ -341,7 +346,9 @@ class Engine:
                                     attempt=attempt + 1, delay_s=round(delay, 2))
                     time.sleep(delay)
             assert auth is not None
-
+            self.stats.record_auth(
+                auth.code.value, int((time.monotonic() - auth_started) * 1000)
+            )
             self._log.event("auth_result", adapter=matched.adapter_id,
                             code=auth.code.value, retryable=auth.retryable,
                             evidence=list(auth.evidence))

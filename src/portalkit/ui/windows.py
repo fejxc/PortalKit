@@ -141,6 +141,67 @@ def _popup(frame, titles: list[str]) -> NSPopUpButton:
     return popup
 
 
+class FormLayout:
+    """纵向表单布局辅助：自上而下放置行，免去逐个手摆 NSMakeRect。
+
+    用法：FormLayout(contentView, width=420, top=200) 后链式调用
+    label/input/checkbox/popup/button_row/textview/space。每方法返回控件。
+    """
+
+    def __init__(self, view, width: float, top: float, margin: float = 20.0):
+        self.view = view
+        self.width = width
+        self.margin = margin
+        self.y = top
+
+    def space(self, height: float = 10.0) -> None:
+        self.y -= height
+
+    def label(self, text: str, *, bold: bool = False, size: int = BODY_FONT, height: float = 20.0):
+        control = _label(NSMakeRect(self.margin, self.y, self.width, height), text, bold=bold, size=size)
+        self.view.addSubview_(control)
+        self.y -= height
+        return control
+
+    def input(self, placeholder: str = "", *, secure: bool = False, height: float = 24.0, label: str | None = None):
+        if label is not None:
+            self.label(label, height=20.0)
+        control = _input(NSMakeRect(self.margin, self.y, self.width, height), placeholder, secure=secure)
+        self.view.addSubview_(control)
+        self.y -= height + 6.0
+        return control
+
+    def checkbox(self, title: str, checked: bool, height: float = 22.0):
+        control = _checkbox(NSMakeRect(self.margin, self.y, self.width, height), title, checked)
+        self.view.addSubview_(control)
+        self.y -= height
+        return control
+
+    def popup(self, titles: list[str], height: float = 26.0):
+        control = _popup(NSMakeRect(self.margin, self.y, self.width, height), titles)
+        self.view.addSubview_(control)
+        self.y -= height + 6.0
+        return control
+
+    def textview(self, height: float):
+        control, tv = _textview(NSMakeRect(self.margin, self.y, self.width, height))
+        self.view.addSubview_(control)
+        self.y -= height + 6.0
+        return control, tv
+
+    def button_row(self, buttons: list[tuple[str, Callable[[], None]]], *, height: float = 32.0, right_align: bool = True):
+        """一行按钮；right_align 从右往左排列，否则从左往右。"""
+        count = len(buttons)
+        gap = 10.0
+        btn_width = (self.width - gap * (count - 1)) / count
+        for index, (title, callback) in enumerate(buttons):
+            x = (self.margin + self.width - btn_width - index * (btn_width + gap)) if right_align \
+                else (self.margin + index * (btn_width + gap))
+            control = _button(NSMakeRect(x, self.y, btn_width, height), title, callback)
+            self.view.addSubview_(control)
+        self.y -= height + 8.0
+
+
 def _confirm(title: str, info: str, ok: str) -> bool:
     alert = NSAlert.alloc().init()
     alert.setMessageText_(title)
@@ -269,20 +330,14 @@ class OnboardingWindow:
 class CredentialsWindow:
     def __init__(self, ctx: "UIContext") -> None:
         self.ctx = ctx
-        self.win = _window("PortalKit — 凭据", 420, 220)
-        c = self.win.contentView()
-        c.addSubview_(_label(NSMakeRect(20, 178, 380, 22), "选择受信网络", bold=True))
-        self.popup = _popup(NSMakeRect(20, 148, 380, 26), [])
-        c.addSubview_(self.popup)
-        c.addSubview_(_label(NSMakeRect(20, 116, 60, 22), "账号"))
-        self.username = _input(NSMakeRect(90, 114, 310, 24))
-        c.addSubview_(self.username)
-        c.addSubview_(_label(NSMakeRect(20, 84, 60, 22), "密码"))
-        self.password = _input(NSMakeRect(90, 82, 310, 24), "留空 = 不修改", secure=True)
-        c.addSubview_(self.password)
-        c.addSubview_(_button(NSMakeRect(20, 28, 110, 32), "保存", self._save))
-        c.addSubview_(_button(NSMakeRect(150, 28, 110, 32), "删除凭据", self._delete))
-        c.addSubview_(_button(NSMakeRect(300, 28, 100, 32), "刷新", self.refresh))
+        self.win = _window("PortalKit — 凭据", 420, 226)
+        form = FormLayout(self.win.contentView(), width=380, top=184)
+        form.label("选择受信网络", bold=True)
+        self.popup = form.popup([])
+        form.space(4)
+        self.username = form.input(placeholder="账号", label="账号")
+        self.password = form.input(placeholder="密码（不回显；留空 = 不修改）", secure=True, label="密码")
+        form.button_row([("保存", self._save), ("删除凭据", self._delete), ("刷新", self.refresh)])
         self._popup_bridge = _ActionBridge.alloc().initWithCallback_(self._picked)
         self.popup.setTarget_(self._popup_bridge)
         self.popup.setAction_("pick:")
@@ -511,6 +566,10 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
         expiry = ctx.engine.session_expires_at()
     if expiry:
         lines.append(f"会话预计有效至: {expiry}")
+    if ctx.engine is not None and getattr(ctx.engine, "stats", None) is not None:
+        summary = ctx.engine.stats.summary_today()
+        if summary:
+            lines.append(f"使用统计: {summary}")
     if state:
         lines += [
             "",
@@ -647,22 +706,18 @@ class DiagnosticsWindow:
 class SettingsWindow:
     def __init__(self, ctx: "UIContext") -> None:
         self.ctx = ctx
-        self.win = _window("PortalKit — 设置", 420, 240)
-        c = self.win.contentView()
+        self.win = _window("PortalKit — 设置", 420, 236)
         settings = self.ctx.settings.get()
-        self.auto = _checkbox(NSMakeRect(20, 190, 380, 22), "在已信任网络自动认证", settings.auto_auth)
-        c.addSubview_(self.auto)
-        self.notify = _checkbox(NSMakeRect(20, 164, 380, 22), "异常与需要操作时系统通知", settings.notify_on_error)
-        c.addSubview_(self.notify)
-        c.addSubview_(_label(NSMakeRect(20, 132, 120, 22), "兜底检查间隔"))
-        self.interval = _popup(NSMakeRect(140, 128, 120, 26),
-                               [f"{s} 秒" for s in (30, 60, 120)])
+        form = FormLayout(self.win.contentView(), width=380, top=196)
+        self.auto = form.checkbox("在已信任网络自动认证", settings.auto_auth)
+        self.notify = form.checkbox("异常与需要操作时系统通知", settings.notify_on_error)
+        form.space(4)
+        form.label("兜底检查间隔")
+        self.interval = form.popup([f"{s} 秒" for s in (30, 60, 120)], height=26)
         self.interval.selectItemAtIndex_((30, 60, 120).index(settings.check_interval_s))
-        c.addSubview_(self.interval)
-        c.addSubview_(_label(
-            NSMakeRect(20, 96, 380, 22),
-            "网络变化由系统事件驱动；此间隔仅为兜底。凭据保存在 Keychain，日志全程脱敏。"))
-        c.addSubview_(_button(NSMakeRect(300, 32, 100, 32), "保存", self._save))
+        form.space(4)
+        form.label("网络变化由系统事件驱动；此间隔仅为兜底。\n凭据保存在 Keychain，日志全程脱敏。", height=34)
+        form.button_row([("保存", self._save)])
         self.refresh()
 
     def refresh(self) -> None:
