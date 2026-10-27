@@ -15,7 +15,10 @@ a = Analysis(
     [os.path.join(ROOT, "src", "portalkit", "ui", "menubar.py")],
     pathex=[os.path.join(ROOT, "src")],
     binaries=[],
-    datas=[],
+    datas=[
+        # 单色菜单栏素材：运行时按 _MEIPASS/assets/monochrome 装载
+        (os.path.join(ROOT, "assets", "monochrome", "png"), os.path.join("assets", "monochrome", "png")),
+    ],
     hiddenimports=["rumps"],
     hookspath=[],
     runtime_hooks=[],

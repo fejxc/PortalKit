@@ -1,173 +1,120 @@
-"""菜单栏状态模板图标（AppKit 绘制，深浅色菜单栏自适应）。
+"""菜单栏状态图标：单色拱门素材（PortalKit_Monochrome_Icons_v2）。
 
-设计语言（用户提供的设计稿，2026-10-26）：圆角"门/拱门"轮廓（portal 意象）
-+ 内部状态元素。按 macOS 菜单栏规范使用单色 template image——系统自动适配
-深浅色菜单栏；状态不能只靠颜色区分（UI_UX_SPEC §9），因此六个形态各异：
-空闲(点) / 检测中(弧) / 认证中(盾) / 已联网(实心圆) / 需处理(叹号三角) / 离线(×)。
+设计语言：统一拱门轮廓 + 五互斥状态（offline × / checking ↻ / online • /
+action ! / unknown ?），与 App Logo 同一形状语言——比多形态彩色版更安静。
 
-ICON_VERSION 变更会使缓存失效（确保新版设计覆盖旧 PNG）。
+接入（素材包 docs/IMPLEMENTATION.md）：PNG 以 `NSImage.isTemplate = true`
+装载，由 macOS 按菜单栏明暗自动着色——黑白两套 PNG 中只使用 black 版
+（template 规范：黑色 + alpha），**不要**在深色模式手动切换白色图标。
+显示 18×18 pt，36 px PNG 作为 2x representation 提供 Retina 清晰度。
+
+动画：checking 的 8 帧（素材建议 100–150ms/帧）仅在后台确有网络任务时
+轮换；尊重系统"降低动态效果"设置（静态 checking 图）。
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from portalkit.models import Phase, StateSnapshot
 
-ICON_VERSION = "v2-door"
-ICON_NAMES = ("idle", "busy", "auth", "ok", "warn", "offline")
+ICON_NAMES = ("offline", "checking", "online", "action", "unknown")
+CHECKING_FRAMES = 8
+ANIM_INTERVAL_S = 0.12  # 素材建议 100–150 ms/帧
 
 
-def _stroke_door() -> None:
-    """画 ∩ 形门/拱轮廓（圆角、圆头笔画）。"""
-    from AppKit import NSBezierPath, NSColor
-
-    path = NSBezierPath.bezierPath()
-    path.setLineWidth_(2.2)
-    path.setLineCapStyle_(2)  # NSRoundLineCapStyle
-    path.moveToPoint_((3.6, 2.0))
-    path.lineToPoint_((3.6, 12.0))
-    path.appendBezierPathWithArcFromPoint_toPoint_radius_((3.6, 15.4), (9.0, 15.4), 3.4)
-    path.lineToPoint_((9.0, 15.4))
-    path.appendBezierPathWithArcFromPoint_toPoint_radius_((14.4, 15.4), (14.4, 12.0), 3.4)
-    path.lineToPoint_((14.4, 2.0))
-    NSColor.blackColor().setStroke()
-    path.stroke()
+def _project_assets_dir() -> Path:
+    """素材目录：开发态=仓库 assets；打包态=PyInstaller 解包目录。"""
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+        candidate = base / "assets" / "monochrome"
+        if candidate.exists():
+            return candidate
+        return Path(sys.executable).parent.parent / "Resources" / "assets" / "monochrome"
+    return Path(__file__).resolve().parents[3] / "assets" / "monochrome"
 
 
-def _dot(x: float, y: float, r: float, fill: bool = True) -> None:
-    from AppKit import NSBezierPath, NSColor, NSMakeRect
-
-    path = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x - r, y - r, 2 * r, 2 * r))
-    if fill:
-        NSColor.blackColor().setFill()
-        path.fill()
-    else:
-        NSColor.blackColor().setStroke()
-        path.setLineWidth_(1.8)
-        path.stroke()
+def assets_dir() -> Path:
+    return _project_assets_dir()
 
 
-def _draw_idle() -> None:
-    _stroke_door()
-    _dot(9.0, 5.2, 1.7, fill=False)  # 底部空心点：待机
+def _load_template(png_18: Path, png_36: Path | None) -> object:
+    """装载 18pt template NSImage；36px 作为 2x representation（Retina）。"""
+    from AppKit import NSImage
+
+    image = NSImage.alloc().initWithContentsOfFile_(str(png_18))
+    if image is None:
+        raise RuntimeError(f"图标缺失: {png_18}")
+    if png_36 and png_36.exists():
+        rep = NSImage.alloc().initWithContentsOfFile_(str(png_36))
+        if rep is not None:
+            for r in rep.representations():
+                r.setSize_((18.0, 18.0))
+                image.addRepresentation_(r)
+    image.setSize_((18.0, 18.0))
+    image.setTemplate_(True)
+    image.setName_(None)
+    return image
 
 
-def _draw_busy() -> None:
-    from AppKit import NSBezierPath, NSColor
-
-    _stroke_door()
-    arc = NSBezierPath.bezierPath()
-    arc.setLineWidth_(2.0)
-    arc.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_(
-        (9.0, 5.6), 3.2, 150.0, 30.0  # 逆时针经顶部(90°)的上弧（检测中）
-    )
-    NSColor.blackColor().setStroke()
-    arc.stroke()
-
-
-def _draw_auth() -> None:
-    from AppKit import NSBezierPath, NSColor, NSMakePoint
-
-    _stroke_door()
-    shield = NSBezierPath.bezierPath()
-    shield.moveToPoint_((9.0, 10.2))
-    shield.lineToPoint_((12.6, 8.6))
-    shield.lineToPoint_((12.6, 5.8))
-    shield.appendBezierPathWithArcFromPoint_toPoint_radius_((9.0, 2.6), (5.4, 5.8), 1.2)
-    shield.lineToPoint_((5.4, 8.6))
-    shield.closePath()
-    NSColor.blackColor().setStroke()
-    shield.setLineWidth_(1.6)
-    shield.stroke()
-    _dot(9.0, 6.6, 1.0)  # 盾心（认证中）
-
-
-def _draw_ok() -> None:
-    _stroke_door()
-    _dot(9.0, 5.6, 3.0)  # 实心圆：已联网
-
-
-def _draw_warn() -> None:
-    from AppKit import NSAttributedString, NSBezierPath, NSColor, NSFont, NSMakePoint
-
-    _stroke_door()
-    tri = NSBezierPath.bezierPath()
-    tri.moveToPoint_((9.0, 9.8))
-    tri.lineToPoint_((12.2, 3.0))
-    tri.lineToPoint_((5.8, 3.0))
-    tri.closePath()
-    NSColor.blackColor().setStroke()
-    tri.setLineWidth_(1.5)
-    tri.stroke()
-    attrs = {"NSFont": NSFont.boldSystemFontOfSize_(7.0), "NSColor": NSColor.blackColor()}
-    NSAttributedString.alloc().initWithString_attributes_("!", attrs).drawAtPoint_(
-        NSMakePoint(7.9, 3.4)
-    )
-
-
-def _draw_offline() -> None:
-    from AppKit import NSBezierPath, NSColor
-
-    _stroke_door()
-    cross = NSBezierPath.bezierPath()
-    cross.setLineWidth_(2.0)
-    cross.moveToPoint_((6.8, 3.4))
-    cross.lineToPoint_((11.2, 7.8))
-    cross.moveToPoint_((11.2, 3.4))
-    cross.lineToPoint_((6.8, 7.8))
-    NSColor.blackColor().setStroke()
-    cross.stroke()
-
-
-_DRAWERS = {
-    "idle": _draw_idle,
-    "busy": _draw_busy,
-    "auth": _draw_auth,
-    "ok": _draw_ok,
-    "warn": _draw_warn,
-    "offline": _draw_offline,
-}
-
-
-def ensure_icons(cache_dir: Path) -> dict[str, Path]:
-    """生成(如缺)并返回各状态 PNG 路径。18×18pt 模板图。"""
-    from AppKit import NSBitmapImageFileTypePNG, NSBitmapImageRep, NSImage
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    # 旧版本图标清理（设计升级后避免残留）
-    for stale in cache_dir.glob("status-*.png"):
-        if ICON_VERSION not in stale.name:
-            stale.unlink(missing_ok=True)
-    paths: dict[str, Path] = {}
+def load_status_images(resource_dir: Path | None = None) -> dict[str, object]:
+    """返回五状态 template NSImage dict。资源缺失抛错（构建期即可发现）。"""
+    root = resource_dir or assets_dir()
+    black = root / "png" / "black"
+    images: dict[str, object] = {}
     for name in ICON_NAMES:
-        path = cache_dir / f"status-{name}-{ICON_VERSION}.png"
-        paths[name] = path
-        if path.exists():
-            continue
-        image = NSImage.alloc().initWithSize_((18.0, 18.0))
-        image.lockFocus()
-        _DRAWERS[name]()
-        image.unlockFocus()
-        image.setTemplate_(True)
-        rep = NSBitmapImageRep.imageRepWithData_(image.TIFFRepresentation())
-        png = rep.representationUsingType_properties_(NSBitmapImageFileTypePNG, {})
-        png.writeToFile_atomically_(str(path), True)
-    return paths
+        images[name] = _load_template(
+            black / f"{name}_18.png", black / f"{name}_36.png"
+        )
+    return images
+
+
+def load_checking_frames(resource_dir: Path | None = None) -> list[object]:
+    """checking 动画 8 帧（同样 template）。缺失时返回空列表→用静态图。"""
+    root = resource_dir or assets_dir()
+    frames_dir = root / "png" / "frames"
+    frames: list[object] = []
+    for index in range(CHECKING_FRAMES):
+        path = frames_dir / f"checking_{index:02d}_36.png"
+        if not path.exists():
+            return []
+        frames.append(_load_template(path, None))
+    return frames
+
+
+def reduce_motion_enabled() -> bool:
+    """系统"降低动态效果"开启时用静态 checking 图（素材包接入要求）。"""
+    try:
+        from AppKit import NSWorkspace
+
+        return bool(NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceMotion)
+    except Exception:  # noqa: BLE001 — 查询失败按不降级处理
+        return False
 
 
 def icon_for_state(state: StateSnapshot | None) -> str:
-    """StateSnapshot → 菜单栏图标名（形态优先，不依赖颜色）。"""
+    """StateSnapshot → 素材状态名（素材包 Status Mapping 的落地）。
+
+    offline  <- 无可用物理网络
+    checking <- 检测/认证/重试/验证执行中
+    online   <- 物理出口验证通过的联网（唯一 online 来源，绝不看单一状态码）
+    action   <- 需要用户操作或明确的认证失败
+    unknown  <- 证据不足 / 无活跃检查
+    """
     if state is None:
-        return "offline"
+        return "unknown"
     if not state.interface or state.link.value == "DISCONNECTED":
         return "offline"
-    if state.phase in (Phase.PROBING, Phase.MATCHING, Phase.RETRY_BACKOFF):
-        return "busy"  # 检测中
-    if state.phase in (Phase.AUTHENTICATING, Phase.VERIFYING):
-        return "auth"  # 认证中
+    if state.phase in (
+        Phase.PROBING, Phase.MATCHING, Phase.AUTHENTICATING,
+        Phase.VERIFYING, Phase.RETRY_BACKOFF, Phase.DEBOUNCING,
+    ):
+        return "checking"
     if state.phase in (Phase.WAITING_USER, Phase.TRUST_REQUIRED, Phase.DEGRADED, Phase.ERROR):
-        return "warn"  # 需处理
+        return "action"
     if state.phase == Phase.IDLE:
-        return "idle"
-    return "ok"  # ONLINE_*
+        return "unknown"
+    if state.phase in (Phase.ONLINE_AUTHENTICATED, Phase.ONLINE_NO_AUTH):
+        return "online"
+    return "unknown"

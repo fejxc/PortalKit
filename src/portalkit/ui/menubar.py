@@ -30,16 +30,20 @@ from portalkit.adapters import default_registry
 def _patch_rumps_nsimage() -> None:
     """绕过 rumps 0.4 × pyobjc 12 兼容 bug：initByReferencingFile_ 在
     Python 3.14 下抛 OC_PythonURL length 异常，导致状态图标永远无法更新
-    （2026-10-26 实测）。语义等价替换为 initWithContentsOfFile_。"""
+    （2026-10-26 实测）。语义等价替换为 initWithContentsOfFile_；
+    同时支持直接传入 NSImage（单色素材以 1x+2x template 预装载）。"""
     from AppKit import NSImage
     import rumps.rumps as _rumps_mod
 
     def _nsimage_from_file(filename, template=None, dimensions=None):
-        image = NSImage.alloc().initWithContentsOfFile_(str(filename))
-        if image is None:
-            return None
-        image.setScalesWhenResized_(True)
-        image.setSize_((20, 20) if dimensions is None else dimensions)
+        if isinstance(filename, NSImage):
+            image = filename  # 预装载素材：尺寸/表示已配好，只按需套 template
+        else:
+            image = NSImage.alloc().initWithContentsOfFile_(str(filename))
+            if image is None:
+                return None
+            image.setScalesWhenResized_(True)
+            image.setSize_((20, 20) if dimensions is None else dimensions)
         if template is not None:
             image.setTemplate_(template)
         return image
@@ -59,7 +63,13 @@ from portalkit.models import ErrorCode, Phase, StateSnapshot
 from portalkit.network.interfaces import NetworkSnapshot, network_label
 from portalkit.network.monitor import NetworkMonitor
 from portalkit.network.scmonitor import SCNetworkListener
-from portalkit.ui.icons import ensure_icons, icon_for_state
+from portalkit.ui.icons import (
+    ANIM_INTERVAL_S,
+    icon_for_state,
+    load_checking_frames,
+    load_status_images,
+    reduce_motion_enabled,
+)
 from portalkit.ui.windows import (
     CredentialsWindow,
     DiagnosticsWindow,
@@ -313,9 +323,12 @@ class EngineWorker(threading.Thread):
 class PortalKitApp(rumps.App):
     def __init__(self, ctx: UIContext) -> None:
         self.ctx = ctx
-        self.icons = ensure_icons(ctx.state_dir / "icons")
+        # 单色拱门素材（template，深浅色菜单栏自动适配；1x+2x 双分辨率）
+        self.icons = load_status_images()
+        self.checking_frames = load_checking_frames()
+        self._frame_index = 0
         super().__init__(
-            name="PortalKit", icon=str(self.icons["offline"]),
+            name="PortalKit", icon=self.icons["offline"],
             template=True, quit_button=None,
         )
         self.template = True
@@ -352,8 +365,13 @@ class PortalKitApp(rumps.App):
         self._windows: dict[str, object] = {}
         self._last_notify_key: tuple | None = None
         self._last_rendered: str | None = None
+        self._anim_shown: str | None = None
         self._timer = rumps.Timer(self._tick, 1)
         self._timer.start()
+        # checking 动画：仅后台确有任务时轮换（素材建议 100–150ms/帧；
+        # 尊重系统"降低动态效果"→ 静态 checking 图）
+        self._anim_timer = rumps.Timer(self._animate, ANIM_INTERVAL_S)
+        self._anim_timer.start()
 
     # ------------------------------------------------------------ callbacks
 
@@ -446,6 +464,25 @@ class PortalKitApp(rumps.App):
             print(f"[portalkit-ui] tick error: {type(exc).__name__}: {exc}", flush=True)
             traceback.print_exc()
 
+    def _animate(self, _timer) -> None:
+        """checking 旋转动画：只在状态为 checking 且未降动态时轮换帧。"""
+        try:
+            state, _, _, _ = self._holder.get()
+            if icon_for_state(state) != "checking" or not self.checking_frames:
+                self._anim_shown = None
+                return
+            if reduce_motion_enabled():
+                if self._anim_shown != "static":
+                    self.icon = self.icons["checking"]
+                    self._anim_shown = "static"
+                return
+            frame = self.checking_frames[self._frame_index % len(self.checking_frames)]
+            self._frame_index += 1
+            self.icon = frame
+            self._anim_shown = "anim"
+        except Exception as exc:  # noqa: BLE001
+            print(f"[portalkit-ui] anim error: {type(exc).__name__}: {exc}", flush=True)
+
     def _tick_inner(self) -> None:
         state, snapshot, busy, detection = self._holder.get()
         if detection is not None and "onboarding" in self._windows:
@@ -454,7 +491,11 @@ class PortalKitApp(rumps.App):
                 onboarding.present_with_detection(detection)
                 self._holder.set_detection(None)
                 return
-        self.icon = self.icons[icon_for_state(state)]
+        self.icon = self.icons[icon_for_state(state)] if not (
+            icon_for_state(state) == "checking"
+            and self.checking_frames
+            and self._anim_shown == "anim"
+        ) else self.icon  # checking 时交给动画帧，避免 1s tick 抢设静态图
         if state is None:
             return
         tag = _TAG_BY_PHASE.get(state.phase, state.phase.value)

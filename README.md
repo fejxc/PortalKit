@@ -27,8 +27,8 @@ PortalKit 解决这两件事：
 - **诚实判定**：所有"已联网"结论必须来自**绑定物理网卡的探针证据**——代理隧道通不算数、门户返回个 200 也不算数。DNS、TCP、HTTP 逐层报告，卡在哪一层一目了然。
 
 <div align="center">
-<img src="assets/menubar-states.png" width="640" alt="菜单栏六种状态">
-<br><sub>菜单栏状态一览：空闲 / 检测中 / 认证中 / 已联网 / 需处理 / 离线（template 图标，深浅色菜单栏自适应，形态互不相同——不依赖颜色也能分辨）</sub>
+<img src="assets/monochrome/preview.png" width="640" alt="菜单栏五种状态">
+<br><sub>单色图标系统：统一拱门轮廓 · 五互斥状态（offline × / checking ↻ / online • / action ! / unknown ?）· NSImage template 自动适配深浅色菜单栏 · 检测中 8 帧旋转动画（尊重系统"降低动态效果"）</sub>
 </div>
 
 ## 功能特性
