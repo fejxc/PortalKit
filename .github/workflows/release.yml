@@ -37,6 +37,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # 幂等：重打同一 tag 时先删旧 Release（保留 tag 本体），再按说明重建
+          gh release delete "${GITHUB_REF_NAME}" --yes || true
           NOTES_FILE="RELEASE_NOTES/${GITHUB_REF_NAME}.md"
           if [ -f "$NOTES_FILE" ]; then
             gh release create "${GITHUB_REF_NAME}" \
