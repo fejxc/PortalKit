@@ -1,6 +1,6 @@
 [project]
 name = "portalkit"
-version = "1.0.4"
+version = "1.0.5"
 description = "PortalKit — macOS 智能网络门户认证助手（CLI + 核心库 + 菜单栏应用）"
 requires-python = ">=3.12"
 dependencies = []
