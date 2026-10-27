@@ -33,6 +33,7 @@ ADAPTER_ID = "zjlib"
 API_VERSION = 1
 
 DEFAULT_ENTRY_URL = "https://2.2.1.1:8443/cn/index.html"
+RECOVERY_SHORT = "门户会话疑似卡住：请忽略此 Wi-Fi 后重新加入，仍失败联系管理员"
 RECOVERY_GUIDANCE = "未能验证可用的会话注销入口。请在系统 Wi-Fi 设置中忽略此网络后重新加入；仍失败时联系网络管理员清除旧会话/检查出口策略。浏览器代理可用不代表物理出口已验证。"
 
 _SUCCESS_TOKENS = (
@@ -251,8 +252,11 @@ class ZjlibAdapter:
                               evidence=(exc.reason,))
         if login.status != 200:
             if entry.status == 404 and login.status == 404:
-                return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
-                                  evidence=("portal session active but login page unavailable; " + RECOVERY_GUIDANCE,))
+                return AuthResult(
+                    AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                    evidence=("entry+login both http 404; no logout entry", RECOVERY_GUIDANCE),
+                    recovery_hint=RECOVERY_SHORT,
+                )
             return AuthResult(AuthCode.NETWORK_ERROR, "error.network", retryable=True,
                               evidence=(f"login page http {login.status}",))
         form = _pick_form(_parse(login.text).forms)
@@ -341,7 +345,8 @@ class ZjlibAdapter:
         except NetworkRequestError:
             evidence.append("recovery:network-failed")
         return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
-                          evidence=(*evidence, RECOVERY_GUIDANCE))
+                          evidence=(*evidence, RECOVERY_GUIDANCE),
+                          recovery_hint=RECOVERY_SHORT)
 
     def verify_protocol(self, ctx: AdapterContext) -> ProtocolVerifyResult:
         client = self._client(ctx)

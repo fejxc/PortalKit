@@ -394,10 +394,13 @@ class Engine:
             auth.code,
             (PortalState.FAILED, Phase.ERROR, ErrorCode.UNKNOWN, "未知结果"),
         )
+        # 适配器提供的短恢复提示优先于默认文案；完整指引在 evidence（诊断窗口）
+        if auth.recovery_hint:
+            detail = auth.recovery_hint
         return self._finish(self._state(
             snap, generation, link=LinkState.READY, portal=portal,
             internet=internet.state, phase=phase, adapter_id=adapter_id,
-            error=error, detail=(auth.evidence[-1] if auth.code == AuthCode.INTERACTION_REQUIRED and auth.evidence else detail),
+            error=error, detail=detail,
             evidence=(*internet.evidence, *auth.evidence),
         ))
 

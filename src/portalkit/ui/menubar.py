@@ -501,13 +501,13 @@ class PortalKitApp(rumps.App):
         tag = _TAG_BY_PHASE.get(state.phase, state.phase.value)
         self._hdr_tag.title = f"PortalKit — {tag}"
         detail = state.detail or state.message_key
-        # 网络名：SSID 优先（定位授权时），缺省网关·接口摘要
         label = network_label(snapshot) if snapshot else None
         show_iface = state.interface and not (snapshot and snapshot.ssid)
         iface = f" · {state.interface}" if show_iface else ""
-        self._hdr_detail.title = (
-            f"{label} · {detail}{iface}" if label else f"{detail}{iface}"
-        )[:140]
+        text = f"{label} · {detail}{iface}" if label else f"{detail}{iface}"
+        if len(text) > 140:
+            text = text[:139].rstrip() + "…"
+        self._hdr_detail.title = text
         if tag != self._last_rendered:
             self._last_rendered = tag
             print(f"[portalkit-ui] ui: {tag} ({state.error_code.value})", flush=True)

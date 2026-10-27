@@ -52,6 +52,9 @@ class AuthResult:
     retryable: bool = False
     evidence: tuple[str, ...] = ()
     keepalive_minutes: int | None = None
+    # 简短的中文恢复提示（≤40 字），用于菜单一行展示；完整指引放 evidence
+    # （诊断窗口可见）。缺省时引擎用 message_key 对应的默认文案。
+    recovery_hint: str = ""
 
 
 @dataclass(frozen=True)

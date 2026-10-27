@@ -436,6 +436,21 @@ def test_session_expiry_persisted_from_keepalive(monkeypatch, tmp_path):
     assert timedelta(hours=23) < remaining <= timedelta(hours=24)
 
 
+def test_recovery_hint_flows_to_detail(monkeypatch, tmp_path):
+    """适配器短恢复提示 → 菜单 detail；完整指引只留在 evidence。"""
+    adapter = FakeAdapter(auth_results=[
+        AuthResult(AuthCode.INTERACTION_REQUIRED, "x",
+                   evidence=("long guidance ...",), recovery_hint="短提示：忽略重连"),
+    ])
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.BLOCKED)],
+                     creds=Credentials("u", "p"))
+    state = engine.authenticate()
+    assert state.phase == Phase.WAITING_USER
+    assert state.detail == "短提示：忽略重连"
+    assert any("long guidance" in e for e in state.evidence)
+
+
 def test_refresh_online_does_not_touch_portal(monkeypatch, tmp_path):
     adapter = FakeAdapter()
     engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
@@ -456,15 +471,19 @@ def test_refresh_requires_trust_and_does_not_read_credentials(monkeypatch, tmp_p
 
 
 def test_refresh_no_endpoint_preserves_physical_evidence(monkeypatch, tmp_path):
-    adapter = FakeAdapter()
-    adapter.refresh_session = lambda ctx: AuthResult(AuthCode.INTERACTION_REQUIRED, 'action',
-                                                     evidence=('忽略网络后重新加入',))
-    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
-                     [_internet(InternetState.UNKNOWN)])
-    state = engine.refresh_session()
-    assert state.phase == Phase.WAITING_USER
-    assert state.detail == '忽略网络后重新加入'
-    assert 'state=UNKNOWN' in state.evidence and adapter.auth_calls == 0
+        adapter = FakeAdapter()
+        adapter.refresh_session = lambda ctx: AuthResult(
+            AuthCode.INTERACTION_REQUIRED, 'action',
+            evidence=('physical: entry+login 404', '忽略网络后重新加入'),
+            recovery_hint='忽略网络后重新加入',
+        )
+        engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                         [_internet(InternetState.UNKNOWN)])
+        state = engine.refresh_session()
+        assert state.phase == Phase.WAITING_USER
+        assert state.detail == '忽略网络后重新加入'
+        assert any('physical:' in e for e in state.evidence)
+        assert 'state=UNKNOWN' in state.evidence and adapter.auth_calls == 0
 
 
 def test_refresh_success_still_requires_physical_verification(monkeypatch, tmp_path):

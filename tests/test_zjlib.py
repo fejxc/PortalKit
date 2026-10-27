@@ -121,6 +121,21 @@ def test_authenticate_entry_404_with_credential_error_classified(portal):
     assert result.code == AuthCode.INVALID_CREDENTIALS
 
 
+def test_stuck_session_returns_short_recovery_hint(portal):
+    """入口与登录页都 404（会话卡死）→ 简短中文提示进菜单 detail，
+    完整恢复指引只在 evidence（诊断窗口），杜绝中英长串截断。"""
+    from portalkit.adapters.zjlib import RECOVERY_SHORT
+
+    portal.route("GET", "/cn/index.html", lambda p, r, q: (404, {}, ""))
+    adapter = _adapter(portal)
+    result = adapter.authenticate(make_ctx(portal), Credentials("u1", "p1"))
+    assert result.code == AuthCode.INTERACTION_REQUIRED
+    assert result.recovery_hint == RECOVERY_SHORT
+    assert len(result.recovery_hint) <= 40
+    assert any("忽略此网络" in ev for ev in result.evidence)
+    assert not any("portal session" in ev for ev in result.evidence)
+
+
 def test_verify_protocol_semantics(portal):
     adapter = _adapter(portal)
     _routes(portal, entry_status=404)
