@@ -436,6 +436,67 @@ class ManagerWindow:
 
 # --------------------------------------------------------------- diagnostics
 
+_PHASE_CN = {
+    "ONLINE_AUTHENTICATED": "✓ 已联网（自动认证完成）",
+    "ONLINE_NO_AUTH": "✓ 已联网（无需登录）",
+    "PROBING": "… 正在检查网络",
+    "MATCHING": "… 正在识别门户",
+    "AUTHENTICATING": "… 正在自动认证",
+    "VERIFYING": "… 正在验证联网",
+    "RETRY_BACKOFF": "… 临时失败，等待重试",
+    "TRUST_REQUIRED": "! 发现认证网络，待确认信任",
+    "WAITING_USER": "! 需要操作",
+    "DEGRADED": "! 连接待验证",
+    "ERROR": "× 异常",
+    "CANCELLED": "· 已取消（网络变化）",
+}
+
+_AUTH_CODE_CN = {
+    "success": "提交成功",
+    "already_authenticated": "会话仍有效",
+    "invalid_credentials": "门户拒绝：账号或密码无效",
+    "interaction_required": "门户要求网页操作",
+    "portal_changed": "门户特征变化",
+    "network_error": "网络临时失败",
+    "untrusted_target": "重定向到未授权目标，已终止",
+    "unknown_error": "未知结果",
+}
+
+
+def _readable_events(ctx: "UIContext", tail: int = 40) -> list[str]:
+    """事件日志 → 可读时间线（最新在最上）。只呈现用户关心的状态流转。"""
+    events_path = ctx.state_dir / "events.jsonl"
+    if not events_path.exists():
+        return ["（暂无事件）"]
+    items: list[dict] = []
+    for line in events_path.read_text(encoding="utf-8").splitlines()[-tail * 3:]:
+        try:
+            item = json.loads(line)
+        except ValueError:
+            continue
+        ev = item.get("event")
+        if ev == "state":
+            phase = str(item.get("phase", ""))
+            text = _PHASE_CN.get(phase, phase)
+            err = str(item.get("error", "none"))
+            if err not in ("", "none"):
+                text += f"（{err}）"
+            items.append(("state", item.get("ts", ""), text))
+        elif ev == "auth_result":
+            code = str(item.get("code", ""))
+            text = "认证提交：" + _AUTH_CODE_CN.get(code, code)
+            items.append(("auth", item.get("ts", ""), text))
+        elif ev == "system_sleep":
+            items.append(("sys", item.get("ts", ""), "系统睡眠"))
+        elif ev == "system_wake":
+            items.append(("sys", item.get("ts", ""), "系统唤醒，正在重新检查"))
+    lines = []
+    for kind, ts, text in reversed(items[-tail:]):
+        clock = ts[11:19] if len(ts) >= 19 else ts  # ISO → HH:MM:SS
+        lines.append(f"{clock}  {text}")
+    return lines
+
+
 def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
     state: StateSnapshot | None = ctx.engine_latest_state()
     lines = ["== PortalKit 诊断（脱敏） ==", ""]
@@ -460,19 +521,8 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
             f"  说明: {state.detail or '-'}",
             *(f"  · {e}" for e in state.evidence),
         ]
-    events_path = ctx.state_dir / "events.jsonl"
-    if events_path.exists():
-        items = events_path.read_text(encoding="utf-8").splitlines()[-tail:]
-        lines += ["", f"最近事件 {len(items)} 条:"]
-        for line in items:
-            try:
-                item = json.loads(line)
-                lines.append(
-                    f"  {item.get('ts', '')} {item.get('event')}"
-                    f" phase={item.get('phase', '')} err={item.get('error', '')}"
-                )
-            except ValueError:
-                continue
+    readable = _readable_events(ctx, tail=tail)
+    lines += ["", f"最近事件（最新在最上）:"] + [f"  {line}" for line in readable]
     return "\n".join(lines)
 
 
@@ -545,6 +595,22 @@ class DiagnosticsWindow:
         c.addSubview_(_button(NSMakeRect(260, 18, 130, 32), "复制诊断信息", self._copy))
         c.addSubview_(_button(NSMakeRect(430, 18, 110, 32), "导出脱敏诊断", self._export))
         self.refresh()
+        self._start_autorefresh()
+
+    def _start_autorefresh(self) -> None:
+        """打开期间每 2 秒自动刷新（用户反馈：事件在跑，窗口却停在打开
+        瞬间的快照，等于"看不到日志"）。窗口不可见时跳过，零开销。"""
+        from Foundation import NSRunLoop, NSTimer
+
+        self._refresh_bridge = _ActionBridge.alloc().initWithCallback_(self._auto_refresh)
+        timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            2.0, self._refresh_bridge, "call:", None, True
+        )
+        NSRunLoop.mainRunLoop().addTimer_forMode_(timer, "kCFRunLoopCommonModes")
+
+    def _auto_refresh(self) -> None:
+        if self.win.isVisible():
+            self.refresh()
 
     def refresh(self) -> None:
         self.tv.setString_(_diagnostics_text(self.ctx))
