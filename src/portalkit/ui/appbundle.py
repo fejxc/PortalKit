@@ -72,13 +72,13 @@ def build_standalone(install_dir: Path | None = None) -> Path:
     shutil.copyfile(icns, staged / "Contents" / "Resources" / "AppIcon.icns")
     info["CFBundleIconFile"] = "AppIcon"
     info_path.write_bytes(plistlib.dumps(info))
-    _adhoc_sign(staged)
+    _sign_bundle(staged)
 
     dest = bundle_path(install_dir)
     if dest.exists():
         shutil.rmtree(dest)
     shutil.copytree(staged, dest)
-    _adhoc_sign(dest)
+    _sign_bundle(dest)
     return dest
 
 
@@ -128,11 +128,42 @@ def _write_launcher(macos_dir: Path, python_exe: str, log_file: Path) -> None:
     binary.chmod(0o755)
 
 
-def _adhoc_sign(bundle_root: Path) -> bool:
+LOCAL_SIGN_IDENTITY = "PortalKit Local Signing"
+
+
+def sign_identity() -> str | None:
+    """可用的稳定代码签名身份；无则 None（回退 ad-hoc）。
+
+    ad-hoc 签名每次构建身份都变 → Keychain ACL 的"始终允许"全部失效，
+    每次自动认证弹授权框。`scripts/make_codesign_cert.sh` 创建的本地
+    自签证书提供稳定身份，一次授权永久生效。
+    """
     proc = subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-", str(bundle_root)],
+        ["security", "find-identity", "-v", "-p", "codesigning"],
         capture_output=True, text=True, check=False,
     )
+    for line in proc.stdout.splitlines():
+        # -v 输出中有效身份行是 `N) HASH "CN"`；只有无效的才带 invalid 标记
+        if LOCAL_SIGN_IDENTITY in line and "invalid" not in line:
+            return LOCAL_SIGN_IDENTITY
+    return None
+
+
+def _sign_bundle(bundle_root: Path) -> bool:
+    """签名：优先稳定的本地身份（Keychain 授权持久），无则回退 ad-hoc。
+
+    不启用 hardened runtime——library validation 会拒绝 PyInstaller
+    产物加载自身目录内的二进制库。
+    """
+    identity = sign_identity()
+    args = (["--sign", identity] if identity else ["--sign", "-"]) + [
+        "--force", "--deep", str(bundle_root),
+    ]
+    proc = subprocess.run(
+        ["codesign", *args], capture_output=True, text=True, check=False,
+    )
+    if proc.returncode != 0:
+        print(f"[appbundle] 签名失败: {proc.stderr.strip()}", flush=True)
     return proc.returncode == 0
 
 
@@ -187,5 +218,5 @@ def build_bundle(python_exe: str, install_dir: Path | None = None,
 
     (contents / "Info.plist").write_bytes(plistlib.dumps(info))
     _write_launcher(macos_dir, python_exe, log)
-    _adhoc_sign(root)
+    _sign_bundle(root)
     return root

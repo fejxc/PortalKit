@@ -24,7 +24,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from portalkit.ui.appbundle import _adhoc_sign, _make_icns  # noqa: E402
+from portalkit.ui.appbundle import _make_icns, _sign_bundle  # noqa: E402
 
 APP_NAME = "PortalKit"
 
@@ -64,7 +64,7 @@ def build(out_dir: Path) -> Path:
     info["CFBundleVersion"] = version
     info_path.write_bytes(plistlib.dumps(info))
     shutil.copyfile(icns, staged / "Contents" / "Resources" / "AppIcon.icns")
-    _adhoc_sign(staged)
+    _sign_bundle(staged)
 
     # 校验：签名有效 + 关键内容在位（CI 与本地同一道关卡）
     _run(["codesign", "--verify", "--deep", "--strict", str(staged)])
