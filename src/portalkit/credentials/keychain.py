@@ -85,18 +85,18 @@ def delete(adapter_id: str, host: str, username: str) -> bool:
     """删除凭据条目；不存在返回 False。"""
     svc = service_name(adapter_id, host).encode("utf-8")
     acct = username.encode("utf-8")
-    length = c_uint32(0)
-    data = c_void_p()
     item = c_void_p()
+    # 关键：length/data 传 NULL——只取 item 引用，不解密条目内容。
+    # 请求密码数据会触发 Keychain ACL 授权弹框；删除/覆盖保存
+    # （save = delete + add）必须零弹窗（2026-10-27 用户反馈）。
     status = _sec.SecKeychainFindGenericPassword(
-        None, len(svc), svc, len(acct), acct, byref(length), byref(data), byref(item)
+        None, len(svc), svc, len(acct), acct, None, None, byref(item)
     )
     if status == _ERR_ITEM_NOT_FOUND:
         return False
     if status != _ERR_SUCCESS:
         raise KeychainError("find-generic-password(for delete)", status)
     try:
-        _sec.SecKeychainItemFreeContent(None, data)
         del_status = _sec.SecKeychainItemDelete(item)
         if del_status not in (_ERR_SUCCESS, _ERR_ITEM_NOT_FOUND):
             raise KeychainError("delete-item", del_status)

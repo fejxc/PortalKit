@@ -37,14 +37,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            build/release/*.zip \
-            --title "PortalKit ${GITHUB_REF_NAME}" \
-            --notes "自包含 macOS 菜单栏应用（Apple Silicon 原生，无需安装 Python）。
-
-          **安装**：解压后将 PortalKit.app 拖入「应用程序」，双击打开。
-          首次打开若提示未公证：右键 → 打开（本版本为 ad-hoc 签名，个人构建）。
-          登录自启：\`portalkit startup install\`（CLI 需源码环境）或系统设置 → 通用 → 登录项。
-
-          变更日志由 GitHub 自动生成。" \
-            --verify-tag
+          NOTES_FILE="RELEASE_NOTES/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            gh release create "${GITHUB_REF_NAME}" \
+              build/release/*.zip \
+              --title "PortalKit ${GITHUB_REF_NAME}" \
+              --notes-file "$NOTES_FILE" \
+              --verify-tag
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              build/release/*.zip \
+              --title "PortalKit ${GITHUB_REF_NAME}" \
+              --generate-notes \
+              --verify-tag
+          fi
