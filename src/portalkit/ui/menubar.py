@@ -223,15 +223,14 @@ class EngineWorker(threading.Thread):
                 self._debounce()
                 self._run("auto")
                 next_fallback = time.monotonic() + self._next_fallback_delay()
-            elif command == "fallback":
-                if self.sc_events:
-                    # SC 事件可用时兜底只做轻量对齐，避免与事件重复全量认证
+            elif command in ("check", "fallback"):
+                # 手动检查与兜底统一走 auto_run:检查 + 按需认证
+                # (SC 事件可用时 fallback 只做轻量 check,防与事件重复)
+                if command == "fallback" and self.sc_events:
                     self._run("check")
                 else:
                     self._run("auto")
                 next_fallback = time.monotonic() + self._next_fallback_delay()
-            elif command == "check":
-                self._run("check")
             elif command == "detect":
                 self._detect()
             elif command == "authenticate":

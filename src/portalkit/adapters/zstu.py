@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import urllib.parse
@@ -163,7 +164,7 @@ def _html_attribute(fragment: str, attribute: str) -> str:
     match = re.search(
         rf"\b{re.escape(attribute)}\s*=\s*(['\"])(.*?)\1", fragment or "", re.I | re.S
     )
-    return urllib.parse.unescape(match.group(2)) if match else ""
+    return html.unescape(match.group(2)) if match else ""
 
 
 def bootstrap(client, entry_url: str, check_generation) -> tuple[PortalConfig, str]:
@@ -278,7 +279,8 @@ def _classify_login_result(result: HTTPResult) -> AuthResult:
         return AuthResult(AuthCode.INVALID_CREDENTIALS, "error.invalid_creds",
                           evidence=(message,))
     return AuthResult(AuthCode.UNKNOWN_ERROR, "status.action_required",
-                      evidence=(message or f"result={value.get('result')}",))
+                      evidence=(message or f"result={value.get('result')}",),
+                      recovery_hint=f"门户返回：{message or '未知原因'}" if message else "")
 
 
 class ZstuAdapter:
