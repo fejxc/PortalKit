@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from AppKit import (
@@ -215,17 +216,36 @@ def _trust_titles(records: list[TrustRecord]) -> list[str]:
     return [f"[{r.adapter_id}] {r.portal_host}:{r.portal_port} ({r.scheme})" for r in records]
 
 
+def _fmt_local(iso_ts: str) -> str:
+    """UTC ISO → 本地短时间（MM-DD HH:MM）；空/损坏返回占位。"""
+    if not iso_ts:
+        return "—"
+    try:
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(iso_ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%m-%d %H:%M")
+    except ValueError:
+        return "—"
+
+
 def _record_detail(rec: TrustRecord) -> str:
     lines = [
         f"适配器:   {rec.adapter_id}",
         f"认证目标: {rec.scheme}://{rec.portal_host}:{rec.portal_port}",
         f"允许宿主: {', '.join(rec.allowed_hosts)}",
         f"自动认证: {'开启' if rec.auto_auth else '关闭'}",
+        f"上次连接: {_fmt_local(rec.last_connected_at)}",
         f"页面指纹: {rec.fingerprint or '未固定'}",
         f"证书指纹: {rec.cert_sha256 or '未固定'}",
-        f"信任时间: {rec.created_at or '未知'}",
+        f"信任时间: {_fmt_local(rec.created_at) if rec.created_at else '未知'}",
         f"网络线索: {rec.network_hint or '-'}",
     ]
+    if rec.session_lifetime_samples:
+        median = sorted(rec.session_lifetime_samples)[len(rec.session_lifetime_samples) // 2]
+        lines.append(f"会话寿命: 约 {median:.0f} 小时（{len(rec.session_lifetime_samples)} 次观测）")
     if rec.scheme == "http":
         lines.append("⚠ HTTP 明文门户：凭据传输不加密。")
     return "\n".join(lines)
@@ -518,11 +538,17 @@ _AUTH_CODE_CN = {
 }
 
 
-def _readable_events(ctx: "UIContext", tail: int = 40) -> list[str]:
-    """事件日志 → 可读时间线（最新在最上）。只呈现用户关心的状态流转。"""
+def _readable_events(ctx: "UIContext", tail: int = 40, only_issues: bool = False) -> list[str]:
+    """事件日志 → 可读时间线（最新在最上）。只呈现用户关心的状态流转。
+
+    only_issues=True 时过滤掉正常项（已联网/成功提交），只留需操作、
+    待验证、失败与系统睡眠唤醒——"扫一眼今天有没有出过事"。
+    """
     events_path = ctx.state_dir / "events.jsonl"
     if not events_path.exists():
         return ["（暂无事件）"]
+    _OK_PHASES = {"ONLINE_AUTHENTICATED", "ONLINE_NO_AUTH"}
+    _OK_AUTH = {"success", "already_authenticated"}
     items: list[dict] = []
     for line in events_path.read_text(encoding="utf-8").splitlines()[-tail * 3:]:
         try:
@@ -532,6 +558,8 @@ def _readable_events(ctx: "UIContext", tail: int = 40) -> list[str]:
         ev = item.get("event")
         if ev == "state":
             phase = str(item.get("phase", ""))
+            if only_issues and phase in _OK_PHASES:
+                continue
             text = _PHASE_CN.get(phase, phase)
             err = str(item.get("error", "none"))
             if err not in ("", "none"):
@@ -539,8 +567,10 @@ def _readable_events(ctx: "UIContext", tail: int = 40) -> list[str]:
             items.append(("state", item.get("ts", ""), text))
         elif ev == "auth_result":
             code = str(item.get("code", ""))
-            text = "认证提交：" + _AUTH_CODE_CN.get(code, code)
-            items.append(("auth", item.get("ts", ""), text))
+            if only_issues and code in _OK_AUTH:
+                continue
+            items.append(("auth", item.get("ts", ""),
+                          "认证提交：" + _AUTH_CODE_CN.get(code, code)))
         elif ev == "system_sleep":
             items.append(("sys", item.get("ts", ""), "系统睡眠"))
         elif ev == "system_wake":
@@ -566,6 +596,10 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
         expiry = ctx.engine.session_expires_at()
     if expiry:
         lines.append(f"会话预计有效至: {expiry}")
+    elif ctx.engine is not None:
+        predicted = ctx.engine.session_predicted_expiry()
+        if predicted:
+            lines.append(f"会话预计有效至: {predicted}（学习值，按历史重登间隔估计）")
     if ctx.engine is not None and getattr(ctx.engine, "stats", None) is not None:
         summary = ctx.engine.stats.summary_today()
         if summary:
@@ -580,8 +614,9 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
             f"  说明: {state.detail or '-'}",
             *(f"  · {e}" for e in state.evidence),
         ]
-    readable = _readable_events(ctx, tail=tail)
-    lines += ["", f"最近事件（最新在最上）:"] + [f"  {line}" for line in readable]
+    readable = _readable_events(ctx, tail=tail,
+                                only_issues=bool(getattr(ctx, "only_issues", False)))
+    lines += ["", "最近事件（最新在最上）:"] + [f"  {line}" for line in readable]
     return "\n".join(lines)
 
 
@@ -647,8 +682,14 @@ class DiagnosticsWindow:
             box.setContentView_(value)
             c.addSubview_(box)
             self.cards.append(value)
-        self.text, self.tv = _textview(NSMakeRect(20, 62, 520, 334))
+        self.text, self.tv = _textview(NSMakeRect(20, 58, 520, 330))
         c.addSubview_(self.text)
+        self.only_issues_toggle = _checkbox(
+            NSMakeRect(20, 380, 300, 20), "只看异常与需要操作", False)
+        c.addSubview_(self.only_issues_toggle)
+        self._issues_bridge = _ActionBridge.alloc().initWithCallback_(self.refresh)
+        self.only_issues_toggle.setTarget_(self._issues_bridge)
+        self.only_issues_toggle.setAction_("call:")
         c.addSubview_(_button(NSMakeRect(20, 18, 110, 32), "重新检查", self.ctx.request_check))
         c.addSubview_(_button(NSMakeRect(150, 18, 90, 32), "刷新", self.refresh))
         c.addSubview_(_button(NSMakeRect(260, 18, 130, 32), "复制诊断信息", self._copy))
@@ -672,6 +713,7 @@ class DiagnosticsWindow:
             self.refresh()
 
     def refresh(self) -> None:
+        self.ctx.only_issues = self.only_issues_toggle.state() == NSControlStateValueOn
         self.tv.setString_(_diagnostics_text(self.ctx))
         for label, word in zip(self.cards, _health_summary(self.ctx)):
             label.setStringValue_(word)
@@ -717,7 +759,36 @@ class SettingsWindow:
         self.interval.selectItemAtIndex_((30, 60, 120).index(settings.check_interval_s))
         form.space(4)
         form.label("网络变化由系统事件驱动；此间隔仅为兜底。\n凭据保存在 Keychain，日志全程脱敏。", height=34)
-        form.button_row([("保存", self._save)])
+        form.button_row([("保存", self._save), ("导出配置", self._export), ("导入配置", self._import)])
+        self.refresh()
+
+    def _export(self) -> None:
+        from portalkit.core.config_io import export_config
+
+        panel = NSSavePanel.savePanel()
+        panel.setNameFieldStringValue_("portalkit-config.json")
+        if panel.runModal() != NSModalResponseOK:
+            return
+        count = export_config(self.ctx.trust, self.ctx.settings, Path(panel.URL().path()))
+        _confirm("已导出", f"已导出 {count} 个受信网络与设置。\n（不含 Keychain 凭据，凭据需在新机重新录入）", "好")
+
+    def _import(self) -> None:
+        from AppKit import NSOpenPanel
+        from portalkit.core.config_io import import_config
+
+        panel = NSOpenPanel.openPanel()
+        panel.setAllowedFileTypes_(["json"])
+        if panel.runModal() != NSModalResponseOK:
+            return
+        if not _confirm("导入配置",
+                        "将合并导入受信网络与设置（凭据需重新录入）。\n继续导入所选文件？", "导入"):
+            return
+        try:
+            n_t, n_s = import_config(self.ctx.trust, self.ctx.settings, Path(panel.URL().path()))
+        except (ValueError, OSError) as exc:
+            _confirm("导入失败", f"文件无法解析：{exc}", "好")
+            return
+        _confirm("已导入", f"导入 {n_t} 个受信网络、{n_s} 项设置。", "好")
         self.refresh()
 
     def refresh(self) -> None:

@@ -436,6 +436,21 @@ def test_session_expiry_persisted_from_keepalive(monkeypatch, tmp_path):
     assert timedelta(hours=23) < remaining <= timedelta(hours=24)
 
 
+def test_success_updates_trust_lifecycle_fields(monkeypatch, tmp_path):
+    """认证成功且物理验证通过 → last_auth_ok_at 记录 + last_connected_at 更新。"""
+    adapter = FakeAdapter(auth_results=[AuthResult(AuthCode.SUCCESS, "ok")])
+    engine = _engine(
+        monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+        [_internet(InternetState.BLOCKED), _internet(InternetState.REACHABLE)],
+        creds=Credentials("u", "p"),
+    )
+    state = engine.authenticate()
+    assert state.phase == Phase.ONLINE_AUTHENTICATED
+    record = engine._trust.lookup("fake", "portal.example")
+    assert record.last_auth_ok_at, "认证成功应记录时刻"
+    assert record.last_connected_at, "物理验证通过应更新上次连接"
+
+
 def test_recovery_hint_flows_to_detail(monkeypatch, tmp_path):
     """适配器短恢复提示 → 菜单 detail；完整指引只留在 evidence。"""
     adapter = FakeAdapter(auth_results=[

@@ -256,20 +256,20 @@ class EngineWorker(threading.Thread):
                 )
 
     def _next_fallback_delay(self) -> float:
-        """兜底间隔 = 设置值与会话"到期前余量窗口"取近者。
+        """兜底间隔 = 设置值与"到期前余量窗口"取近者。
 
-        会话临近过期时提前加密检查（只加检查、不加凭据提交——是否重登
-        仍由 auto_run 的在线判定决定，遵守 A03）。
+        到期时间来源：门户 keepalive（权威）→ 学习值（历史重登间隔中位数）。
+        临近过期只加密**检查**、不加凭据提交——是否重登仍由在线判定决定（A03）。
         """
         base = float(self.settings.get().check_interval_s)
-        expires = self.engine.session_expires_at()
+        expires = self.engine.session_expires_at() or self.engine.session_predicted_expiry()
         if not expires:
             return base
         try:
             expiry = datetime.fromisoformat(expires)
         except ValueError:
             return base
-        margin = timedelta(minutes=30)
+        margin = timedelta(minutes=15)
         seconds_to_margin = (expiry - margin - datetime.now(timezone.utc)).total_seconds()
         if seconds_to_margin <= 0:
             return min(base, 30.0)  # 已进入余量窗口：尽快复查（限流防打转）
@@ -355,6 +355,9 @@ class PortalKitStatusBar:
         self._windows: dict[str, object] = {}
         self._last_notify_key: tuple | None = None
         self._last_rendered: str | None = None
+        self._last_icon_name: str | None = None
+        self._last_detail_text: str | None = None
+        self._anim_timer = None
 
         self._holder = StateHolder()
         self.ctx._holder = self._holder
@@ -386,10 +389,9 @@ class PortalKitStatusBar:
             1.0, self._bridge(self._tick), "call:", None, True
         )
         NSRunLoop.mainRunLoop().addTimer_forMode_(self._timer, "kCFRunLoopCommonModes")
-        self._anim_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
-            ANIM_INTERVAL_S, self._bridge(self._animate), "call:", None, True
-        )
-        NSRunLoop.mainRunLoop().addTimer_forMode_(self._anim_timer, "kCFRunLoopCommonModes")
+        # 动画定时器按需启停：常驻 120ms 空转一天约 57 万次唤醒（耗电 bug），
+        # 只有进入 checking 态才创建、离开即销毁。
+        self._anim_timer = None
 
     # -------------------------------------------------------------- build
 
@@ -423,6 +425,9 @@ class PortalKitStatusBar:
         add("强制刷新会话", self._on_refresh_session)
         add("取消当前任务", self._on_cancel)
         add("检查更新…", self._on_check_updates)
+        # 条件显示：仅在需操作/待确认/待验证时出现（_tick_inner 控制隐藏）
+        self._wifi_settings_item = add("打开 Wi-Fi 设置…", self._on_wifi_settings)
+        self._wifi_settings_item.setHidden_(True)
         menu.addItem_(NSMenuItem.separatorItem())
         add("添加 / 确认可信网络…", self._on_onboarding)
         add("录入 / 更新凭据…", self._on_credentials)
@@ -480,6 +485,14 @@ class PortalKitStatusBar:
 
     def _on_cancel(self) -> None:
         self.worker.submit("cancel")
+
+    def _on_wifi_settings(self) -> None:
+        """直达系统设置的 Wi-Fi 面板（卡死会话"忽略重连"指引的最后一公里）。"""
+        from AppKit import NSURL, NSWorkspace
+
+        NSWorkspace.sharedWorkspace().openURL_(
+            NSURL.URLWithString_("x-apple.systempreferences:com.apple.wifi-settings")
+        )
 
     def _on_notification_action(self, action: str) -> None:
         if action == "onboarding":
@@ -547,11 +560,11 @@ class PortalKitStatusBar:
             traceback.print_exc()
 
     def _animate(self) -> None:
-        """checking 旋转动画：只在状态为 checking 且未降动态时轮换帧。"""
+        """checking 旋转动画帧推进。定时器只在 checking 态存在（见 _tick_inner）。"""
         try:
             state, _, _, _ = self._holder.get()
             if icon_for_state(state) != "checking" or not self.checking_frames:
-                self._anim_shown = None
+                self._stop_anim()
                 return
             if reduce_motion_enabled():
                 if self._anim_shown != "static":
@@ -565,6 +578,22 @@ class PortalKitStatusBar:
         except Exception as exc:  # noqa: BLE001
             print(f"[portalkit-ui] anim error: {type(exc).__name__}: {exc}", flush=True)
 
+    def _start_anim(self) -> None:
+        if self._anim_timer is not None:
+            return
+        from Foundation import NSRunLoop
+
+        self._anim_timer = NSTimer.timerWithTimeInterval_target_selector_userInfo_repeats_(
+            ANIM_INTERVAL_S, self._bridge(self._animate), "call:", None, True
+        )
+        NSRunLoop.mainRunLoop().addTimer_forMode_(self._anim_timer, "kCFRunLoopCommonModes")
+
+    def _stop_anim(self) -> None:
+        if self._anim_timer is not None:
+            self._anim_timer.invalidate()
+            self._anim_timer = None
+            self._anim_shown = None
+
     def _set_icon(self, image) -> None:
         self._status_item.button().setImage_(image)
 
@@ -577,13 +606,23 @@ class PortalKitStatusBar:
                 self._holder.set_detection(None)
                 return
         name = icon_for_state(state)
-        # checking 时交给动画帧，避免 1s tick 抢设静态图
-        if not (name == "checking" and self.checking_frames and self._anim_shown == "anim"):
-            self._set_icon(self.icons[name])
+        if name == "checking" and self.checking_frames:
+            self._start_anim()  # 进入 checking：动画定时器按需启动
+            if not (self._anim_shown == "anim" and not reduce_motion_enabled()):
+                pass  # 帧推进交给 _animate
+        else:
+            self._stop_anim()  # 离开 checking：立即销毁，零空转
+            if self._last_icon_name != name:
+                self._set_icon(self.icons[name])
+                self._last_icon_name = name
+            self._anim_shown = None
         if state is None:
             return
         tag = _TAG_BY_PHASE.get(state.phase, state.phase.value)
-        self._hdr_tag.setTitle_(f"PortalKit — {tag}")
+        if tag != self._last_rendered:
+            self._last_rendered = tag
+            self._hdr_tag.setTitle_(f"PortalKit — {tag}")
+            print(f"[portalkit-ui] ui: {tag} ({state.error_code.value})", flush=True)
         detail = state.detail or state.message_key
         # 网络名：SSID 优先（定位授权时），缺省网关·接口摘要
         label = network_label(snapshot) if snapshot else None
@@ -592,10 +631,14 @@ class PortalKitStatusBar:
         text = f"{label} · {detail}{iface}" if label else f"{detail}{iface}"
         if len(text) > 140:
             text = text[:139].rstrip() + "…"
-        self._hdr_detail.setTitle_(text)
-        if tag != self._last_rendered:
-            self._last_rendered = tag
-            print(f"[portalkit-ui] ui: {tag} ({state.error_code.value})", flush=True)
+        if text != self._last_detail_text:
+            self._last_detail_text = text
+            self._hdr_detail.setTitle_(text)
+        # 卡死/待验证/需确认等时刻显示"打开 Wi-Fi 设置"直达项
+        if self._wifi_settings_item is not None:
+            self._wifi_settings_item.setHidden_(state.phase not in (
+                Phase.WAITING_USER, Phase.TRUST_REQUIRED, Phase.DEGRADED,
+            ))
         self._maybe_notify(state)
 
     def _maybe_notify(self, state: StateSnapshot) -> None:

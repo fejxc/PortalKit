@@ -10,7 +10,8 @@ from __future__ import annotations
 import json
 import os
 import threading
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
 DEFAULT_STORE_DIR = Path.home() / "Library" / "Application Support" / "PortalKit"
@@ -29,6 +30,11 @@ class TrustRecord:
     created_at: str = ""
     note: str = ""
     auto_auth: bool = True  # 此网络是否自动认证（PRD F13；显式 authenticate 不受此限）
+    last_connected_at: str = ""  # 最近一次"认证成功且物理验证通过"的时间
+    last_auth_ok_at: str = ""  # 最近一次认证提交成功（会话建立）时间
+    # 观测到的会话寿命样本（小时）：两次真实重登之间的间隔。zjlib 不下发
+    # keepalive，用中位数驱动"临近过期加密检查"（只加检查不加提交，A03）。
+    session_lifetime_samples: tuple[float, ...] = ()
 
     @property
     def key(self) -> str:
@@ -70,6 +76,9 @@ class TrustRegistry:
                     created_at=item.get("created_at", ""),
                     note=item.get("note", ""),
                     auto_auth=bool(item.get("auto_auth", True)),  # 旧记录缺省视为开启
+                    last_connected_at=item.get("last_connected_at", ""),
+                    last_auth_ok_at=item.get("last_auth_ok_at", ""),
+                    session_lifetime_samples=tuple(item.get("session_lifetime_samples") or ()),
                 )
                 self._records[rec.key] = rec
         except (OSError, ValueError, KeyError):
@@ -102,6 +111,54 @@ class TrustRegistry:
             self._records[rec.key] = rec
             self._save()
             return rec
+
+    def touch_connected(self, adapter_id: str, portal_host: str, iso_ts: str) -> TrustRecord | None:
+        """认证成功且物理验证通过后更新"上次连接"（网络管理窗口展示用）。"""
+        with self._lock:
+            rec = self._records.get(f"{adapter_id}:{portal_host}")
+            if rec is None:
+                return None
+            rec = replace(rec, last_connected_at=iso_ts)
+            self._records[rec.key] = rec
+            self._save()
+            return rec
+
+    def note_auth_success(self, adapter_id: str, portal_host: str, iso_ts: str,
+                          *, min_gap_hours: float = 1.0, max_samples: int = 10) -> TrustRecord | None:
+        """记录认证成功时刻，并从"两次真实重登的间隔"学习会话寿命样本。
+
+        间隔小于 min_gap_hours（快速刷新/卡死重试）不计入——它们不代表
+        会话自然到期。样本保留最近 max_samples 个。
+        """
+        with self._lock:
+            rec = self._records.get(f"{adapter_id}:{portal_host}")
+            if rec is None:
+                return None
+            samples = list(rec.session_lifetime_samples)
+            if rec.last_auth_ok_at:
+                try:
+                    gap_h = (datetime.fromisoformat(iso_ts)
+                             - datetime.fromisoformat(rec.last_auth_ok_at)).total_seconds() / 3600
+                    if gap_h >= min_gap_hours:
+                        samples.append(round(gap_h, 2))
+                        samples = samples[-max_samples:]
+                except ValueError:
+                    pass  # 时间戳损坏时丢弃本次样本，不影响会话记录
+            rec = replace(rec, last_auth_ok_at=iso_ts, session_lifetime_samples=tuple(samples))
+            self._records[rec.key] = rec
+            self._save()
+            return rec
+
+    def median_session_lifetime_hours(self, adapter_id: str, portal_host: str) -> float | None:
+        rec = self._records.get(f"{adapter_id}:{portal_host}")
+        samples = rec.session_lifetime_samples if rec else None
+        if not samples:
+            return None
+        ordered = sorted(samples)
+        mid = len(ordered) // 2
+        if len(ordered) % 2:
+            return float(ordered[mid])
+        return (ordered[mid - 1] + ordered[mid]) / 2
 
     def fingerprint_matches(self, record: TrustRecord, observed: str | None) -> bool:
         """observed=None 视为"本次未能观测"，不据此否定既有信任。"""

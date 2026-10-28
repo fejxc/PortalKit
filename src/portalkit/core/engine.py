@@ -32,6 +32,7 @@ from portalkit.models import (
     PortalState,
     StateSnapshot,
     message_key_for,
+    utc_now_iso,
 )
 from portalkit.network.http import BoundHTTPClient
 from portalkit.network.monitor import GenerationStale, NetworkMonitor
@@ -112,6 +113,22 @@ class Engine:
         except (OSError, ValueError):
             return None
         return data.get("session_expires_at")
+
+    def session_predicted_expiry(self) -> str | None:
+        """学习值：基于历史重登间隔中位数的预计到期时间（keepalive 缺失时的补偿）。"""
+        best: datetime | None = None
+        for rec in self._trust.all():
+            median = self._trust.median_session_lifetime_hours(rec.adapter_id, rec.portal_host)
+            if median is None or not rec.last_auth_ok_at:
+                continue
+            try:
+                expiry = (datetime.fromisoformat(rec.last_auth_ok_at)
+                          + timedelta(hours=median))
+            except ValueError:
+                continue
+            if best is None or expiry > best:
+                best = expiry
+        return best.isoformat(timespec="seconds") if best else None
 
     def request_cancel(self) -> None:
         """请求取消当前任务：立即推进 network_generation，在途步骤在
@@ -366,8 +383,12 @@ class Engine:
                     self._log.event("session_expiry_estimated",
                                     adapter=matched.adapter_id,
                                     keepalive_minutes=auth.keepalive_minutes)
+                self._trust.note_auth_success(
+                    matched.adapter_id, matched.portal_host, utc_now_iso()
+                )
                 return self._verify(
                     snap, generation, matched_adapter, internet_state=internet.state, already=False,
+                    portal_host=matched.portal_host,
                 )
             return self._finish(self._auth_failure(snap, generation, matched.adapter_id, auth, internet))
 
@@ -411,7 +432,8 @@ class Engine:
             evidence=(*internet.evidence, *auth.evidence),
         ))
 
-    def _verify(self, snap, generation, adapter: PortalAdapter, *, internet_state, already: bool) -> StateSnapshot:
+    def _verify(self, snap, generation, adapter: PortalAdapter, *, internet_state,
+                already: bool, portal_host: str | None = None) -> StateSnapshot:
         """认证成功/会话有效后的物理出口验证（完成判定红线）。"""
         self._advance(Phase.VERIFYING)
         try:
@@ -427,6 +449,8 @@ class Engine:
                 error=ErrorCode.VERIFY_FAILED, detail=f"验证阶段异常: {type(exc).__name__}",
             ))
         if internet.reachable and protocol.session_valid is not False:
+            if portal_host:
+                self._trust.touch_connected(adapter.id, portal_host, utc_now_iso())
             return self._finish(self._state(
                 snap, generation, link=LinkState.READY, portal=PortalState.AUTHENTICATED,
                 internet=InternetState.REACHABLE, phase=Phase.ONLINE_AUTHENTICATED,
