@@ -24,7 +24,10 @@ SERVICES = {"isService": "false", "defaultService": "", "serviceJson": "[]"}
 
 
 def _adapter(portal):
-    return ZstuAdapter(discovery_url=portal.url("/generate_204"))
+    return ZstuAdapter(
+        discovery_url=portal.url("/generate_204"),
+        discovery_candidates=tuple(portal.url(p) for p in ("/connecttest.txt", "/ns", "/ex")),
+    )
 
 
 def _routes(portal, *, login_result=None, redirect_to="index"):
@@ -93,6 +96,12 @@ def test_detect_success_jsp_means_session_valid(portal):
     assert result.already_authenticated
 
 
+def _whitelist_all_204(portal):
+    """模拟"所有发现候选都被白名单放行"的校园网环境。"""
+    for path_ in ("/generate_204", "/connecttest.txt", "/"):
+        portal.route("GET", path_, lambda p, r, q: (204, {}, ""))
+
+
 def test_detect_204_without_entry_reports_not_matched(portal):
     """探测域名被白名单放行(假在线)且未配置门户入口 → 如实报未匹配;
     引擎此时回退探针结论(门户在场否决由引擎负责)。"""
@@ -107,6 +116,7 @@ def test_detect_204_with_entry_probes_portal(portal):
     adapter = ZstuAdapter(
         discovery_url=portal.url("/generate_204"),
         entry_url=portal.url("/eportal/index.jsp?wlanuserip=x&mac=y&url=z"),
+        discovery_candidates=tuple(portal.url(p) for p in ("/ct", "/ns", "/ex")),
     )
     portal.route("GET", "/generate_204", lambda p, r, q: (204, {}, ""))
     portal.route("GET", "/eportal/index.jsp", lambda p, r, q: (200, {}, "<html>eportal</html>"))
@@ -141,8 +151,11 @@ def test_authenticate_validcode_interaction_required(portal):
     assert result.code == AuthCode.INTERACTION_REQUIRED
 
 
-def test_authenticate_discovery_204_already_online(portal):
-    portal.route("GET", "/generate_204", lambda p, r, q: (204, {}, ""))
+def test_authenticate_discovery_all_204_reports_already_online(portal):
+    """所有发现候选都直通(204)= 真在线 → 不提交(A03)。
+
+    仅部分候选 204(白名单放行)时不早退——多候选发现会改试非白名单站。"""
+    _whitelist_all_204(portal)
     result = _adapter(portal).authenticate(make_ctx(portal), Credentials("stu", "pw"))
     assert result.code == AuthCode.ALREADY_AUTHENTICATED
 
@@ -159,7 +172,7 @@ def test_authenticate_missing_query_params_rejected(portal):
 
 def test_verify_protocol_semantics(portal):
     adapter = _adapter(portal)
-    portal.route("GET", "/generate_204", lambda p, r, q: (204, {}, ""))
+    _whitelist_all_204(portal)
     assert adapter.verify_protocol(make_ctx(portal)).session_valid is True
     _routes(portal, redirect_to="success")
     assert adapter.verify_protocol(make_ctx(portal)).session_valid is True

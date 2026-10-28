@@ -34,6 +34,15 @@ ADAPTER_ID = "zstu"
 API_VERSION = 1
 
 DEFAULT_DISCOVERY_URL = "http://connectivitycheck.gstatic.com/generate_204"
+# 发现候选：连通性检测域名常被校园网**白名单放行**（认证前也 204 = 假在线），
+# 非白名单 HTTP 站会被 AC 302 到带新鲜会话参数的门户入口——后者才是
+# 白名单环境下唯一可靠的发现途径（2026-10-28 浙理工现场）。
+DISCOVERY_CANDIDATES: tuple[str, ...] = (
+    DEFAULT_DISCOVERY_URL,
+    "http://www.msftconnecttest.com/connecttest.txt",
+    "http://neverssl.com/",
+    "http://example.com/",
+)
 _JS_URI_SAFE = "-_.!~*'()"
 
 
@@ -289,11 +298,16 @@ class ZstuAdapter:
     api_version = API_VERSION
 
     def __init__(self, discovery_url: str = DEFAULT_DISCOVERY_URL,
-                 entry_url: str | None = None) -> None:
+                 entry_url: str | None = None,
+                 discovery_candidates: tuple[str, ...] | None = None) -> None:
         self._discovery_url = discovery_url
         # 门户入口完整 URL（含会话参数）：校园网白名单放行探针域名时
         # discovery 会返回 204（假在线），此时用 entry 直连门户引导会话。
         self._entry_url = entry_url
+        # 发现候选：构造参数优先（测试注入 / 现场覆盖），通用候选殿后。
+        self._discovery_candidates = (
+            (discovery_url,) + (discovery_candidates or DISCOVERY_CANDIDATES)
+        )
 
     # ------------------------------------------------------------- helpers
 
@@ -305,12 +319,27 @@ class ZstuAdapter:
         return None
 
     def _discover(self, ctx: AdapterContext, *, strict_hosts: frozenset[str] | None):
-        """discovery → 302 → ePortal 入口。strict_hosts 非 None 时禁止跳出该集合。"""
+        """discovery → 302 → ePortal 入口。strict_hosts 非 None 时禁止跳出该集合。
+
+        多候选依次尝试：连通性检测域名被白名单放行(204)时改试非白名单
+        HTTP 站——AC 对未认证设备的 302 携带新鲜会话参数，是白名单环境
+        下唯一可靠的入口来源（2026-10-28 浙理工现场）。"""
         # detect/verify 阶段无凭据，allowed=None 允许观察跳转链（作为证据记录）；
         # authenticate 阶段传入 {portal_host, discovery_host}，跳转越界立即终止。
+        # 构造参数指定的 discovery_url 优先(测试注入/现场覆盖),通用候选殿后。
         client = ctx.client_factory(strict_hosts, tls_verify=True)
-        result = client.request(self._discovery_url)
-        return client, result
+        candidates = self._discovery_candidates
+        for url in candidates:
+            try:
+                result = client.request(url)
+            except NetworkRequestError:
+                continue  # 该候选不可达，试下一个
+            if result.status == 204:
+                continue  # 候选直通(被放行)——试下一个找门户
+            if result.status == 404:
+                continue  # 候选不存在(测试/环境无此站)——试下一个
+            return client, result
+        return client, None  # 全部候选直通(204)——"假在线"弱信号,由调用方按语义处理
 
     # -------------------------------------------------------------- detect
 
@@ -323,10 +352,10 @@ class ZstuAdapter:
         except UntrustedRedirectError as exc:
             host = self._portal_host_of(exc.url)
             return self._match_redirect(host, exc.url, cert=None, extra=("redirect to unlisted host",))
-        if result.status == 204:
+        if result is None or result.status == 204:
             # 探测域名被白名单放行的"假在线"：配置了门户入口 URL 时直接
-            # 探测门户（可能伺服登录页=待认证）；未配置则如实报已在线。
-            if self._entry_url:
+            # 探测门户（可能伺服登录页=待认证）；未配置则如实报未匹配。
+            if result is None and self._entry_url:
                 try:
                     entry_client = ctx.client_factory(None, tls_verify=True)
                     entry_result = entry_client.request(self._entry_url)
@@ -337,7 +366,7 @@ class ZstuAdapter:
                 except (NetworkRequestError, UntrustedRedirectError):
                     pass
             return DetectionResult(matched=False, adapter_id=ADAPTER_ID,
-                                   evidence=("discovery 204 = online; no entry url configured",))
+                                   evidence=("all discovery candidates 204 = online; no entry url",))
         host = self._portal_host_of(result.url)
         return self._match_redirect(host, result.url, cert=result.peer_cert_sha256)
 
@@ -364,15 +393,15 @@ class ZstuAdapter:
         try:
             # 先做一次无凭据发现以确定门户宿主，再以严格 allowed_hosts 重建客户端。
             client0, probe = self._discover(ctx, strict_hosts=None)
-            # discovery 204（探测域名被白名单放行）是"假在线"弱证据——在
-            # authenticate 上下文不可信；配置了门户入口 URL 时直连入口引导
+            # discovery 全候选直通（探测域名被白名单放行）是"假在线"弱证据——
+            # 在 authenticate 上下文不可信；配置了门户入口 URL 时直连入口引导
             # 会话（2026-10-28 浙理工现场：gstatic 204 但门户伺服登录页）。
-            if probe.status == 204 and self._entry_url:
+            if probe is None and self._entry_url:
                 ctx.check_generation()
                 probe = client0.request(self._entry_url)
-            if probe.status == 204 and not self._entry_url:
+            if probe is None:
                 return AuthResult(AuthCode.ALREADY_AUTHENTICATED, "status.no_auth",
-                                  evidence=("discovery 204 = online",))
+                                  evidence=("all discovery 204 = online",))
             portal_host = self._portal_host_of(probe.url)
             if portal_host is None:
                 return AuthResult(AuthCode.PORTAL_CHANGED, "error.portal_changed",
@@ -426,9 +455,16 @@ class ZstuAdapter:
     def verify_protocol(self, ctx: AdapterContext) -> ProtocolVerifyResult:
         try:
             client, result = self._discover(ctx, strict_hosts=None)
-        except (NetworkRequestError, UntrustedRedirectError) as exc:
+        except NetworkRequestError as exc:
             return ProtocolVerifyResult(None, (f"discovery failed: {type(exc).__name__}",))
-        if result.status == 204:
+        if result is None or result.status == 204:
+            if result is None and self._entry_url:
+                entry_result = client.request(self._entry_url)
+                path = urlsplit(entry_result.url).path
+                if path.endswith("success.jsp"):
+                    return ProtocolVerifyResult(True, ("entry success.jsp = session valid",))
+                if path.endswith("index.jsp"):
+                    return ProtocolVerifyResult(False, ("entry index.jsp = session invalid",))
             return ProtocolVerifyResult(True, ("discovery 204 = online",))
         path = urlsplit(result.url).path
         if path.endswith("success.jsp"):
