@@ -224,8 +224,9 @@ class EngineWorker(threading.Thread):
                 self._run("auto")
                 next_fallback = time.monotonic() + self._next_fallback_delay()
             elif command in ("check", "fallback"):
-                # 手动检查与兜底统一走 auto_run:检查 + 按需认证
-                # (SC 事件可用时 fallback 只做轻量 check,防与事件重复)
+                # 手动「重新检查网络」与兜底统一走 auto_run:检查 + 按需认证
+                # (用户点"重新检查"的期望是恢复联网,不是只看状态)。
+                # SC 事件可用时 fallback 只做轻量 check,防与事件重复全量认证。
                 if command == "fallback" and self.sc_events:
                     self._run("check")
                 else:
