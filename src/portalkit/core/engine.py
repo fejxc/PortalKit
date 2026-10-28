@@ -240,17 +240,9 @@ class Engine:
             except GenerationStale:
                 return self._cancelled(snap)
 
-            if internet.reachable:
-                # 已验证在线：不再提交凭据（A03），真实语义"无需认证"。
-                return self._finish(self._state(
-                    snap, generation, link=LinkState.READY,
-                    portal=PortalState.NOT_REQUIRED, internet=InternetState.REACHABLE,
-                    phase=Phase.ONLINE_NO_AUTH,
-                    detail="物理网络已通过多探针验证，无需登录",
-                    evidence=internet.evidence,
-                ))
-
-            # ---- 门户识别
+            # ---- 门户识别先行（门户在场否决，2026-10-28 现场教训）：
+            # 高校门户常白名单放行 connectivitycheck 等探针域名，"探针通过"
+            # 在有门户的网络里只是弱证据——必须先问门户，再谈"无需登录"。
             self._advance(Phase.MATCHING)
             matched: DetectionResult | None = None
             matched_adapter: PortalAdapter | None = None
@@ -262,6 +254,17 @@ class Engine:
                 if detection.matched:
                     matched, matched_adapter = detection, adapter
                     break
+
+            if internet.reachable and not (matched and matched.matched):
+                # 只有确实没有已知门户时，探针结论才可授予"无需登录"。
+                return self._finish(self._state(
+                    snap, generation, link=LinkState.READY,
+                    portal=PortalState.NOT_REQUIRED, internet=InternetState.REACHABLE,
+                    phase=Phase.ONLINE_NO_AUTH,
+                    detail="物理网络已通过多探针验证，无需登录",
+                    evidence=internet.evidence,
+                ))
+
             if matched is None or matched_adapter is None:
                 return self._finish(self._state(
                     snap, generation, link=LinkState.READY,
@@ -294,6 +297,18 @@ class Engine:
                     evidence=matched.evidence,
                 ))
 
+            if matched.already_authenticated and (not allow_auth or internet.reachable):
+                # 会话有效时的安全跳过（优先于 refresh）：
+                # - check 场景：不提交，只做物理验证；
+                # - 门户报会话有效且物理探针在线：会话其实好着，refresh 也
+                #   不折腾（refresh 的用途是修"卡死"，即物理路径断的场景）；
+                # - authenticate/refresh 且物理路径断：already 弱证据不可信，
+                #   不跳过——必须提交刷新会话（2026-10-26 现场教训）。
+                return self._verify(
+                    snap, generation, matched_adapter, internet_state=internet.state,
+                    already=True,
+                )
+
             if refresh:
                 recover = getattr(matched_adapter, "refresh_session", None)
                 try:
@@ -317,10 +332,13 @@ class Engine:
                     evidence=matched.evidence,
                 ))
 
-            if matched.already_authenticated and not allow_auth:
-                # check 场景：门户报会话有效 → 只做物理验证，不提交。
-                # authenticate 场景不采用该捷径——物理路径已知不通时
-                # "会话有效"弱证据不可信，必须提交刷新会话（2026-10-26 现场教训）。
+            if matched.already_authenticated and (not allow_auth or internet.reachable):
+                # 会话有效时的安全跳过：
+                # - check 场景：不提交，只做物理验证；
+                # - 门户报会话有效且物理探针在线：会话其实好着，refresh 也
+                #   不折腾（refresh 的用途是修"卡死"，即物理路径断的场景）；
+                # - authenticate/refresh 且物理路径断：already 弱证据不可信，
+                #   不跳过——必须提交刷新会话（2026-10-26 现场教训）。
                 return self._verify(
                     snap, generation, matched_adapter, internet_state=internet.state,
                     already=True,
@@ -451,9 +469,12 @@ class Engine:
         if internet.reachable and protocol.session_valid is not False:
             if portal_host:
                 self._trust.touch_connected(adapter.id, portal_host, utc_now_iso())
+            # already=True(门户报会话原本有效)→ 无本次认证发生,如实用
+            # "无需登录"而非"自动认证成功"(A03 的文案纪律)。
+            phase = Phase.ONLINE_NO_AUTH if already else Phase.ONLINE_AUTHENTICATED
             return self._finish(self._state(
                 snap, generation, link=LinkState.READY, portal=PortalState.AUTHENTICATED,
-                internet=InternetState.REACHABLE, phase=Phase.ONLINE_AUTHENTICATED,
+                internet=InternetState.REACHABLE, phase=phase,
                 adapter_id=adapter.id,
                 detail=("会话有效且物理路径已验证" if already else "自动认证完成，物理路径已验证"),
                 evidence=(*protocol.evidence, *internet.evidence),

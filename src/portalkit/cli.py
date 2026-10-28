@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from portalkit.adapters import default_registry
+from portalkit.adapters import AdapterRegistry, ZjlibAdapter, ZstuAdapter
 from portalkit.adapters.base import Credentials
 from portalkit.core.engine import DEFAULT_STATE_DIR, Engine
 from portalkit.core.trust import TrustRecord, TrustRegistry
@@ -47,10 +47,17 @@ def _build_engine(state_dir=None) -> Engine:
         sink_path=(state_dir or DEFAULT_STATE_DIR) / "events.jsonl",
         echo_stderr=False,
     )
+    # 学生网等白名单放行探针域名的场景：从信任记录读取门户入口 URL 注入适配器
+    trust = TrustRegistry()
+    zstu_entry = next(
+        (r.entry_url for r in trust.all()
+         if r.adapter_id == "zstu" and r.entry_url),
+        None,
+    )
     return Engine(
         monitor=NetworkMonitor(),
-        registry=default_registry(),
-        trust=TrustRegistry(),
+        registry=AdapterRegistry([ZjlibAdapter(), ZstuAdapter(entry_url=zstu_entry)]),
+        trust=trust,
         credentials=KeychainCredentialService(),
         logger=logger,
         state_dir=state_dir,
@@ -270,7 +277,7 @@ def cmd_trust_auto(args) -> int:
 
 
 def cmd_trust_add(args) -> int:
-    registry = default_registry()
+    registry = _build_registry()
     adapter = registry.get(args.adapter)
     if adapter is None:
         print(f"未知适配器: {args.adapter}（可用: {', '.join(registry.ids())}）", file=sys.stderr)
@@ -287,9 +294,11 @@ def cmd_trust_add(args) -> int:
     )
     if args.host:
         # 手动指定目标（门户入口与 discovery 不同宿主时的兜底）。
+        from portalkit.adapters.base import DetectionResult
+
         parts = urlsplit(args.host if "://" in args.host else f"https://{args.host}")
         scheme = args.scheme or (parts.scheme or "https")
-        matched = matched.__class__(
+        matched = DetectionResult(
             matched=True, adapter_id=adapter.id,
             portal_scheme=scheme,
             portal_host=parts.hostname or args.host,
@@ -330,6 +339,7 @@ def cmd_trust_add(args) -> int:
         scheme=scheme, allowed_hosts=(host,),
         cert_sha256=matched.observed_cert_sha256,
         fingerprint=matched.fingerprint,
+        entry_url=getattr(args, "entry_url", "") or "",
         network_hint=f"iface={report.snapshot.interface} gw={report.snapshot.gateway}",
         created_at=report.snapshot.timestamp,
         note="cli trust add",
@@ -357,8 +367,18 @@ def cmd_trust_revoke(args) -> int:
 
 # --------------------------------------------------------- credentials 管理
 
+def _build_registry() -> AdapterRegistry:
+    """构造适配器注册表:zstu 注入信任记录里的门户入口 URL(如有)。"""
+    trust = TrustRegistry()
+    zstu_entry = next(
+        (r.entry_url for r in trust.all() if r.adapter_id == "zstu" and r.entry_url),
+        None,
+    )
+    return AdapterRegistry([ZjlibAdapter(), ZstuAdapter(entry_url=zstu_entry)])
+
+
 def cmd_credentials_set(args) -> int:
-    registry = default_registry()
+    registry = _build_registry()
     adapter = registry.get(args.adapter)
     if adapter is None:
         print(f"未知适配器: {args.adapter}", file=sys.stderr)
@@ -471,6 +491,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--host", help="手动指定认证目标（默认自动识别）")
     p.add_argument("--port", type=int)
     p.add_argument("--scheme", choices=("http", "https"))
+    p.add_argument("--entry-url", help="门户入口完整 URL（含会话参数；白名单放行探针域名的网络必填，如 zstu 学生网）")
     p.add_argument("--yes", action="store_true", help="跳过交互确认（仅自动化场景）")
     p.set_defaults(func=cmd_trust_add)
     p = trust_sub.add_parser("revoke", help="撤销信任", parents=[common])

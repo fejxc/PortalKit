@@ -155,15 +155,16 @@ def test_offline_reports_no_interface(monkeypatch, tmp_path):
 
 
 def test_reachable_internet_skips_portal_entirely(monkeypatch, tmp_path):
-    """A03：已验证在线 → 不识别、不认证，语义为"无需认证"。"""
-    adapter = FakeAdapter()
+    """无门户且探针通过 → 不识别、不认证，语义为"无需认证"。
+
+    （有已知门户时探针结论会被门户在场否决——见 test_refresh_online。）"""
+    adapter = FakeAdapter(detection=DetectionResult(matched=False, adapter_id="fake"))
     engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
                      [_internet(InternetState.REACHABLE)])
     state = engine.check()
     assert state.phase == Phase.ONLINE_NO_AUTH
     assert state.portal == PortalState.NOT_REQUIRED
     assert state.internet == InternetState.REACHABLE
-    assert adapter.detect_calls == 0
     assert adapter.auth_calls == 0
 
 
@@ -251,12 +252,15 @@ def test_success_with_verified_internet(monkeypatch, tmp_path):
 
 
 def test_already_authenticated_still_verifies(monkeypatch, tmp_path):
+    """提交路径发现会话有效(未发生真实提交)→ 物理验证通过后如实用
+    "无需登录"(A03 文案纪律),不宣称"自动认证成功"。"""
     adapter = FakeAdapter(auth_results=[AuthResult(AuthCode.ALREADY_AUTHENTICATED, "ok")])
     engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
                      [_internet(InternetState.BLOCKED), _internet(InternetState.REACHABLE)],
                      creds=Credentials("u", "p"))
     state = engine.authenticate()
-    assert state.phase == Phase.ONLINE_AUTHENTICATED
+    assert state.phase == Phase.ONLINE_NO_AUTH
+    assert state.portal == PortalState.AUTHENTICATED
     assert adapter.auth_calls == 1
 
 
@@ -312,8 +316,10 @@ def test_request_cancel_bumps_generation(monkeypatch, tmp_path):
 
 
 def test_auto_run_online_never_authenticates(monkeypatch, tmp_path):
-    """auto_run：已验证在线 → 不触发认证（A03 语义）。"""
-    adapter = FakeAdapter()
+    """auto_run：无门户且探针通过 → 不触发认证（A03 语义）。
+
+    门户在场时即使探针通过也不早退——由门户语义决定（门户在场否决）。"""
+    adapter = FakeAdapter(detection=DetectionResult(matched=False, adapter_id="fake"))
     engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
                      [_internet(InternetState.REACHABLE)],
                      creds=Credentials("u", "p"))
@@ -377,7 +383,8 @@ def test_check_uses_already_authenticated_shortcut(monkeypatch, tmp_path):
     state = engine.check()
     assert adapter.auth_calls == 0
     assert adapter.verify_calls == 1
-    assert state.phase == Phase.ONLINE_AUTHENTICATED
+    # 会话原本有效(无本次认证发生)→ 如实显示"无需登录"而非"自动认证成功"
+    assert state.phase == Phase.ONLINE_NO_AUTH
 
 
 def test_auto_run_untrusted_stops_before_credentials(monkeypatch, tmp_path):
@@ -467,11 +474,20 @@ def test_recovery_hint_flows_to_detail(monkeypatch, tmp_path):
 
 
 def test_refresh_online_does_not_touch_portal(monkeypatch, tmp_path):
-    adapter = FakeAdapter()
+    """在线且门户报会话有效 → refresh 安全跳过(只物理验证,不动门户)。"""
+    adapter = FakeAdapter(detection=DetectionResult(
+        matched=True, adapter_id="fake",
+        portal_scheme="http", portal_host="portal.example", portal_port=80,
+        fingerprint="fp1", already_authenticated=True,
+    ))
     engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
-                     [_internet(InternetState.REACHABLE)])
-    assert engine.refresh_session().phase == Phase.ONLINE_NO_AUTH
-    assert adapter.detect_calls == adapter.auth_calls == 0
+                     [_internet(InternetState.REACHABLE),   # refresh 前探测
+                      _internet(InternetState.REACHABLE)])  # already 跳过后的物理验证
+    state = engine.refresh_session()
+    assert state.phase == Phase.ONLINE_NO_AUTH
+    assert adapter.auth_calls == 0
+    # 门户在场否决:在线也要询问门户一次(白名单放行探针的环境防假在线)
+    assert adapter.detect_calls == 1
 
 
 def test_refresh_requires_trust_and_does_not_read_credentials(monkeypatch, tmp_path):

@@ -286,8 +286,12 @@ class ZstuAdapter:
     name = "浙江理工大学"
     api_version = API_VERSION
 
-    def __init__(self, discovery_url: str = DEFAULT_DISCOVERY_URL) -> None:
+    def __init__(self, discovery_url: str = DEFAULT_DISCOVERY_URL,
+                 entry_url: str | None = None) -> None:
         self._discovery_url = discovery_url
+        # 门户入口完整 URL（含会话参数）：校园网白名单放行探针域名时
+        # discovery 会返回 204（假在线），此时用 entry 直连门户引导会话。
+        self._entry_url = entry_url
 
     # ------------------------------------------------------------- helpers
 
@@ -318,10 +322,20 @@ class ZstuAdapter:
             host = self._portal_host_of(exc.url)
             return self._match_redirect(host, exc.url, cert=None, extra=("redirect to unlisted host",))
         if result.status == 204:
-            # 与 zstu 门户语义：204 = 已在线（engine 层面通常在更早的互联网探测已放行）。
-            return DetectionResult(matched=True, adapter_id=ADAPTER_ID,
-                                   already_authenticated=True, needs_trust=True,
-                                   evidence=("discovery 204 = online",))
+            # 探测域名被白名单放行的"假在线"：配置了门户入口 URL 时直接
+            # 探测门户（可能伺服登录页=待认证）；未配置则如实报已在线。
+            if self._entry_url:
+                try:
+                    entry_client = ctx.client_factory(None, tls_verify=True)
+                    entry_result = entry_client.request(self._entry_url)
+                    return self._match_redirect(
+                        self._portal_host_of(entry_result.url), entry_result.url,
+                        cert=entry_result.peer_cert_sha256,
+                    )
+                except (NetworkRequestError, UntrustedRedirectError):
+                    pass
+            return DetectionResult(matched=False, adapter_id=ADAPTER_ID,
+                                   evidence=("discovery 204 = online; no entry url configured",))
         host = self._portal_host_of(result.url)
         return self._match_redirect(host, result.url, cert=result.peer_cert_sha256)
 
@@ -348,7 +362,13 @@ class ZstuAdapter:
         try:
             # 先做一次无凭据发现以确定门户宿主，再以严格 allowed_hosts 重建客户端。
             client0, probe = self._discover(ctx, strict_hosts=None)
-            if probe.status == 204:
+            # discovery 204（探测域名被白名单放行）是"假在线"弱证据——在
+            # authenticate 上下文不可信；配置了门户入口 URL 时直连入口引导
+            # 会话（2026-10-28 浙理工现场：gstatic 204 但门户伺服登录页）。
+            if probe.status == 204 and self._entry_url:
+                ctx.check_generation()
+                probe = client0.request(self._entry_url)
+            if probe.status == 204 and not self._entry_url:
                 return AuthResult(AuthCode.ALREADY_AUTHENTICATED, "status.no_auth",
                                   evidence=("discovery 204 = online",))
             portal_host = self._portal_host_of(probe.url)

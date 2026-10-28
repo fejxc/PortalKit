@@ -32,6 +32,7 @@ class TrustRecord:
     auto_auth: bool = True  # 此网络是否自动认证（PRD F13；显式 authenticate 不受此限）
     last_connected_at: str = ""  # 最近一次"认证成功且物理验证通过"的时间
     last_auth_ok_at: str = ""  # 最近一次认证提交成功（会话建立）时间
+    entry_url: str = ""  # 门户入口完整 URL（含会话参数；discovery 被白名单放行时的直连入口）
     # 观测到的会话寿命样本（小时）：两次真实重登之间的间隔。zjlib 不下发
     # keepalive，用中位数驱动"临近过期加密检查"（只加检查不加提交，A03）。
     session_lifetime_samples: tuple[float, ...] = ()
@@ -78,6 +79,7 @@ class TrustRegistry:
                     auto_auth=bool(item.get("auto_auth", True)),  # 旧记录缺省视为开启
                     last_connected_at=item.get("last_connected_at", ""),
                     last_auth_ok_at=item.get("last_auth_ok_at", ""),
+                    entry_url=str(item.get("entry_url", "")),
                     session_lifetime_samples=tuple(item.get("session_lifetime_samples") or ()),
                 )
                 self._records[rec.key] = rec
@@ -95,10 +97,18 @@ class TrustRegistry:
 
     # ------------------------------------------------------------- lookup
 
+    def reload(self) -> None:
+        """从磁盘重读(跨进程场景:CLI 写入后菜单栏进程需感知)。"""
+        with self._lock:
+            self._records = {}
+            self._load()
+
     def all(self) -> list[TrustRecord]:
+        self.reload()
         return list(self._records.values())
 
     def lookup(self, adapter_id: str, portal_host: str) -> TrustRecord | None:
+        self.reload()
         return self._records.get(f"{adapter_id}:{portal_host}")
 
     def update_auto_auth(self, adapter_id: str, portal_host: str, enabled: bool) -> TrustRecord | None:
@@ -185,7 +195,10 @@ class TrustRegistry:
 
     def revoke(self, adapter_id: str, portal_host: str) -> bool:
         with self._lock:
-            return self._records.pop(f"{adapter_id}:{portal_host}", None) is not None
+            removed = self._records.pop(f"{adapter_id}:{portal_host}", None) is not None
+            if removed:
+                self._save()  # 撤销必须落盘,否则 reload 会把它找回来
+            return removed
 
     def update_fingerprint(self, adapter_id: str, portal_host: str, cert_sha256: str) -> TrustRecord | None:
         with self._lock:

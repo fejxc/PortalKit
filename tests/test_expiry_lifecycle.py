@@ -71,7 +71,7 @@ def test_session_expiry_triggers_auto_relogin(portal, monkeypatch, tmp_path):
     monitor = FakeMonitor(
         NetworkSnapshot(interface="lo0", ipv4="127.0.0.1", gateway=None, dns=None)
     )
-    scripted = [_online(), _blocked(), _blocked(), _online()]
+    scripted = [_online(), _online(), _blocked(), _online(), _online()]
     monkeypatch.setattr(
         engine_module, "check_internet", lambda i, d, timeout=5.0: scripted.pop(0)
     )
@@ -108,6 +108,7 @@ def test_session_expiry_triggers_auto_relogin(portal, monkeypatch, tmp_path):
     assert "password=p1" in submits[0]["body"]  # 假门户本地断言；日志侧已脱敏
 
     # 3) 恢复在线后再 auto_run：不再提交（A03 回归）
+    scripted.append(_online())
     scripted.append(_online())
     s3 = engine.auto_run()
     assert s3.phase == Phase.ONLINE_NO_AUTH

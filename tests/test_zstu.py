@@ -93,11 +93,25 @@ def test_detect_success_jsp_means_session_valid(portal):
     assert result.already_authenticated
 
 
-def test_detect_204_means_online(portal):
+def test_detect_204_without_entry_reports_not_matched(portal):
+    """探测域名被白名单放行(假在线)且未配置门户入口 → 如实报未匹配;
+    引擎此时回退探针结论(门户在场否决由引擎负责)。"""
     portal.route("GET", "/generate_204", lambda p, r, q: (204, {}, ""))
     result = _adapter(portal).detect(make_ctx(portal))
-    assert result.matched
-    assert result.already_authenticated
+    assert not result.matched
+    assert any("204" in ev for ev in result.evidence)
+
+
+def test_detect_204_with_entry_probes_portal(portal):
+    """配置了门户入口 URL 时,假在线直接探测门户 → 可识别登录页。"""
+    adapter = ZstuAdapter(
+        discovery_url=portal.url("/generate_204"),
+        entry_url=portal.url("/eportal/index.jsp?wlanuserip=x&mac=y&url=z"),
+    )
+    portal.route("GET", "/generate_204", lambda p, r, q: (204, {}, ""))
+    portal.route("GET", "/eportal/index.jsp", lambda p, r, q: (200, {}, "<html>eportal</html>"))
+    result = adapter.detect(make_ctx(portal))
+    assert result.matched and not result.already_authenticated
 
 
 def test_authenticate_success_and_rsa_roundtrip(portal):
