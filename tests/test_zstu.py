@@ -111,8 +111,10 @@ def test_detect_204_without_entry_reports_not_matched(portal):
     assert any("204" in ev for ev in result.evidence)
 
 
-def test_detect_204_with_entry_probes_portal(portal):
-    """配置了门户入口 URL 时,假在线直接探测门户 → 可识别登录页。"""
+def test_detect_204_with_entry_does_not_probe_login_page(portal):
+    """全候选直通(白名单放行)时,detect 不得探测 entry 登录页——
+    旧参数登录页永远伺服,会造成反复提交互踢用户会话(现场教训)。
+    entry_url 只属于 authenticate 的最后手段。"""
     adapter = ZstuAdapter(
         discovery_url=portal.url("/generate_204"),
         entry_url=portal.url("/eportal/index.jsp?wlanuserip=x&mac=y&url=z"),
@@ -121,7 +123,9 @@ def test_detect_204_with_entry_probes_portal(portal):
     portal.route("GET", "/generate_204", lambda p, r, q: (204, {}, ""))
     portal.route("GET", "/eportal/index.jsp", lambda p, r, q: (200, {}, "<html>eportal</html>"))
     result = adapter.detect(make_ctx(portal))
-    assert result.matched and not result.already_authenticated
+    assert not result.matched
+    assert any("no portal hijack" in ev for ev in result.evidence)
+    assert portal.requests_to("/eportal/index.jsp") == []  # 登录页未被探测
 
 
 def test_authenticate_success_and_rsa_roundtrip(portal):

@@ -102,9 +102,29 @@ class Engine:
         - 已信任门户且未在线 → 完整认证 + 物理验证。
         """
         checked = self._run(allow_auth=False, auto=True)
-        if checked.phase == Phase.MATCHING:
+        if checked.phase == Phase.MATCHING and checked.internet != InternetState.REACHABLE:
+            # 二段认证的两个安全闸(单设备互踢环境的保护):
+            # - 物理探针未通过(白名单假在线时不盲目提交);
+            # - 距上次成功认证超过 10 分钟(刚认证成功就不再提交,
+            #   避免踢掉用户刚建立的会话——2026-10-28 现场互踢教训)。
+            recent = self._recent_auth_success()
+            if recent is not None and recent < 600:
+                self._log.event("auto_auth_throttled",
+                                seconds_since_last=round(recent, 1))
+                return checked
             return self._run(allow_auth=True, auto=True)
         return checked
+
+    def _recent_auth_success(self) -> float | None:
+        """距上次成功认证的秒数;无记录返回 None。"""
+        try:
+            data = json.loads((self._state_dir / "state.json").read_text(encoding="utf-8"))
+            ts = data.get("last_auth_success_at")
+            if not ts:
+                return None
+            return (datetime.now(timezone.utc) - datetime.fromisoformat(ts)).total_seconds()
+        except (OSError, ValueError):
+            return None
 
     def session_expires_at(self) -> str | None:
         """最近一次认证成功的会话预计到期时间（ISO；门户未提供 keepalive 时为 None）。"""
@@ -376,7 +396,7 @@ class Engine:
                     snap, generation, link=LinkState.READY,
                     portal=PortalState.DETECTED, internet=internet.state,
                     phase=Phase.MATCHING, adapter_id=matched.adapter_id,
-                    detail="已识别并信任该门户；运行 authenticate 执行认证",
+                    detail=f"已识别并信任 {matched_adapter.name} 门户；点「立即认证」即可登录",
                     evidence=matched.evidence,
                 ))
 
@@ -431,6 +451,8 @@ class Engine:
                 self._trust.note_auth_success(
                     matched.adapter_id, matched.portal_host, utc_now_iso()
                 )
+                self._last_auth_success_at = utc_now_iso()
+                self._log.event("auth_success_recorded", adapter=matched.adapter_id)
                 return self._verify(
                     snap, generation, matched_adapter, internet_state=internet.state, already=False,
                     portal_host=matched.portal_host,
@@ -551,8 +573,11 @@ class Engine:
         expires = self._pending_session_expiry
         if expires is not None or "session_expires_at" not in payload:
             payload["session_expires_at"] = expires
+        if self._last_auth_success_at:
+            payload["last_auth_success_at"] = self._last_auth_success_at
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, ensure_ascii=False, indent=2)
 
     _pending_session_expiry: str | None = None
+    _last_auth_success_at: str | None = None

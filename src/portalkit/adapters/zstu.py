@@ -355,20 +355,12 @@ class ZstuAdapter:
             host = self._portal_host_of(exc.url)
             return self._match_redirect(host, exc.url, cert=None, extra=("redirect to unlisted host",))
         if result is None or result.status == 204:
-            # 探测域名被白名单放行的"假在线"：配置了门户入口 URL 时直接
-            # 探测门户（可能伺服登录页=待认证）；未配置则如实报未匹配。
-            if result is None and self._entry_url:
-                try:
-                    entry_client = ctx.client_factory(None, tls_verify=True)
-                    entry_result = entry_client.request(self._entry_url)
-                    return self._match_redirect(
-                        self._portal_host_of(entry_result.url), entry_result.url,
-                        cert=entry_result.peer_cert_sha256,
-                    )
-                except (NetworkRequestError, UntrustedRedirectError):
-                    pass
+            # 全候选直通(白名单放行)= 无门户劫持信号。**不探测 entry_url**:
+            # 带旧会话参数的登录页在已放行状态下也永远伺服,把它当"待认证"
+            # 会引发反复提交、互踢用户真实会话(2026-10-28 现场教训)。
+            # entry_url 只在 authenticate(物理路径确认不通)时作最后手段。
             return DetectionResult(matched=False, adapter_id=ADAPTER_ID,
-                                   evidence=("all discovery candidates 204 = online; no entry url",))
+                                   evidence=("all discovery candidates 204 = online (no portal hijack)",))
         host = self._portal_host_of(result.url)
         return self._match_redirect(host, result.url, cert=result.peer_cert_sha256)
 
