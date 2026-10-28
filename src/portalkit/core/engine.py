@@ -39,6 +39,7 @@ from portalkit.network.monitor import GenerationStale, NetworkMonitor
 from portalkit.network.probes import check_internet
 
 DEFAULT_STATE_DIR = Path.home() / "Library" / "Application Support" / "PortalKit"
+KICK_SUSPECT_WINDOW_S = 2700  # 45 分钟内"成功后又掉线"视为疑似互踢(单设备学校)
 
 
 class CredentialService(Protocol):
@@ -102,16 +103,32 @@ class Engine:
         - 已信任门户且未在线 → 完整认证 + 物理验证。
         """
         checked = self._run(allow_auth=False, auto=True)
-        if checked.phase == Phase.MATCHING and checked.internet != InternetState.REACHABLE:
-            # 二段认证的两个安全闸(单设备互踢环境的保护):
-            # - 物理探针未通过(白名单假在线时不盲目提交);
-            # - 距上次成功认证超过 10 分钟(刚认证成功就不再提交,
-            #   避免踢掉用户刚建立的会话——2026-10-28 现场互踢教训)。
+        if checked.phase == Phase.MATCHING:
+            # 二段认证的安全闸(单设备互踢环境的保护)。门户判定"需要认证"
+            # (AC 劫持)是主导信号;探针结论(白名单假在线)不作门槛。
             recent = self._recent_auth_success()
             if recent is not None and recent < 600:
+                # 刚认证成功:绝不重提交(会踢掉用户刚建立的会话)
                 self._log.event("auto_auth_throttled",
                                 seconds_since_last=round(recent, 1))
                 return checked
+            if recent is not None and recent < KICK_SUSPECT_WINDOW_S:
+                # 近期成功过但又掉线:疑似被其他设备抢占(学校单设备限制)。
+                # 自动重提交会与用户其他设备无限互踢——转人工决策,
+                # 手动「立即认证」仍可主动夺取。
+                self._log.event("kick_suspected", seconds_since_last=round(recent, 1))
+                return self._finish(self._state(
+                    NetworkSnapshot(
+                        interface=checked.interface, ipv4=None, gateway=None, dns=None
+                    ),
+                    checked.network_generation,
+                    link=checked.link, portal=PortalState.DETECTED,
+                    internet=checked.internet, phase=Phase.WAITING_USER,
+                    adapter_id=checked.adapter_id,
+                    error=ErrorCode.INTERACTION_REQUIRED,
+                    detail="疑似其他设备抢占了校园网(学校限单设备)。"
+                           "请在其他设备上断开校园网后点「立即认证」。",
+                ))
             return self._run(allow_auth=True, auto=True)
         return checked
 
@@ -567,11 +584,16 @@ class Engine:
     def _persist(self, state: StateSnapshot) -> None:
         self._state_dir.mkdir(parents=True, exist_ok=True)
         path = self._state_dir / "state.json"
-        payload = state.to_dict()
-        # 会话到期估计：仅当最近一次认证结果带 keepalive 数据时更新，否则保留
-        # 旧值（会话可能仍然有效）；离线/失败状态不擦除它。
+        # 合并式持久化:状态快照覆盖,但 last_auth_success_at / session_expires_at
+        # 这类"学习/估计"字段必须跨状态保留(否则 MATCHING 持久化会抹掉
+        # 互踢节流的依据——2026-10-28 发现)。
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except (OSError, ValueError):
+            existing = {}
+        payload = {**existing, **state.to_dict()}
         expires = self._pending_session_expiry
-        if expires is not None or "session_expires_at" not in payload:
+        if expires is not None or "session_expires_at" not in existing:
             payload["session_expires_at"] = expires
         if self._last_auth_success_at:
             payload["last_auth_success_at"] = self._last_auth_success_at

@@ -281,12 +281,26 @@ class OnboardingWindow:
         c.addSubview_(_button(NSMakeRect(160, 24, 110, 32), "稍后", self.win.close))
         self._detection = None
 
+    def _sibling_credential(self, adapter_id: str, portal_host: str):
+        """同适配器其他门户已保存的凭据(同校多门户一次录入,处处复用)。"""
+        for rec in self.ctx.trust.all():
+            if rec.adapter_id == adapter_id and rec.portal_host != portal_host:
+                creds = self.ctx.credentials.get(rec.adapter_id, rec.portal_host)
+                if creds is not None:
+                    return creds
+        return None
+
     def present_with_detection(self, detection) -> None:
         """detection: DetectionResult；在主线程调用。"""
         self._detection = detection
         if detection is None:
             self.summary_tv.setString_("正在识别当前网络的门户……请稍候，或点击菜单“重新检查网络”。")
         else:
+            if detection.matched and detection.portal_host:
+                creds = self._sibling_credential(detection.adapter_id, detection.portal_host)
+                if creds is not None and not str(self.username.stringValue()).strip():
+                    self.username.setStringValue_(creds.username)
+                    self.password.setStringValue_(creds.password)
             lines = ["未能在当前网络识别门户。可尝试：连接目标 Wi-Fi 后重试；或手动指定目标（见 README）。"]
             if detection.matched:
                 scheme = detection.portal_scheme or "https"
@@ -366,6 +380,18 @@ class CredentialsWindow:
 
     def _picked(self) -> None:
         username = self._current_username()
+        if not username:
+            # 无凭据:预填同适配器其他门户的账号(密码需重输,防误改)
+            rec = self._selected()
+            if rec is not None:
+                sibling = next(
+                    (r for r in self.ctx.trust.all()
+                     if r.adapter_id == rec.adapter_id and r.portal_host != rec.portal_host),
+                    None,
+                )
+                if sibling is not None:
+                    names = self.ctx.credentials.usernames(sibling.adapter_id, sibling.portal_host)
+                    username = names[0] if names else ""
         self.username.setStringValue_(username or "")
 
     def _records(self) -> list[TrustRecord]:

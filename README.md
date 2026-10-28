@@ -136,6 +136,10 @@ python3 -m venv .venv && .venv/bin/pip install -e '.[ui,dev]'
 
 测试不含真实凭据；门户回归用 `tests/fakeserver.py` 的本地假门户覆盖 404 / 204 / 302 / RSA / 改版等分支。
 
+## 常见问题
+
+遇到"显示已联网但打不开网页""门户提示认证失败""设备未注册"等情况,先看 **[docs/faq.md](docs/faq.md)**——里面覆盖了 Clash 代理共存、单设备互踢、Wi-Fi 私有地址(MAC 随机化)、白名单假在线等高频问题的定位与解决。
+
 ## 已知限制
 
 - 仅支持 **Apple Silicon + macOS 15+**；未签名分发，换机首次打开需右键 → 打开

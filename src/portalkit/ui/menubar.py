@@ -420,10 +420,11 @@ class PortalKitStatusBar:
         self._hdr_tag = add("PortalKit — 空闲")
         self._hdr_detail = add("正在等待首次检查…")
         menu.addItem_(NSMenuItem.separatorItem())
-        add("重新检查网络", self._on_check, key="r")
-        add("立即认证", self._on_authenticate)
-        add("强制刷新会话", self._on_refresh_session)
-        add("取消当前任务", self._on_cancel)
+        self._recheck_item = add("重新检查网络", self._on_check, key="r")
+        self._auth_item = add("立即认证", self._on_authenticate)
+        self._refresh_item = add("强制刷新会话", self._on_refresh_session)
+        self._cancel_item = add("取消当前任务", self._on_cancel)
+        self._cancel_item.setEnabled_(False)  # 初始无任务
         add("检查更新…", self._on_check_updates)
         # 条件显示：仅在需操作/待确认/待验证时出现（_tick_inner 控制隐藏）
         self._wifi_settings_item = add("打开 Wi-Fi 设置…", self._on_wifi_settings)
@@ -619,6 +620,10 @@ class PortalKitStatusBar:
         if state is None:
             return
         tag = _TAG_BY_PHASE.get(state.phase, state.phase.value)
+        busy = busy or state.phase in _IN_FLIGHT
+        self._cancel_item.setEnabled_(busy)
+        for item in (self._recheck_item, self._auth_item, self._refresh_item):
+            item.setEnabled_(not busy)
         if tag != self._last_rendered:
             self._last_rendered = tag
             self._hdr_tag.setTitle_(f"PortalKit — {tag}")
