@@ -163,10 +163,10 @@ class UIContext:
     _holder: "StateHolder" = None  # type: ignore[assignment]
 
     def engine_latest_state(self) -> Optional[StateSnapshot]:
-        return self._holder.get().state if self._holder else None
+        return self._holder.get()[0] if self._holder else None
 
     def engine_latest_snapshot(self) -> Optional[NetworkSnapshot]:
-        return self._holder.get().snapshot if self._holder else None
+        return self._holder.get()[1] if self._holder else None
 
 
 class StateHolder:

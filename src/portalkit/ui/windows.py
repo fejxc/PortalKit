@@ -322,6 +322,7 @@ class OnboardingWindow:
         if not username or (save_kb and not password):
             _confirm("信息不完整", "账号与密码不能为空。", "知道了")
             return
+        existing = self.ctx.trust.lookup(detection.adapter_id, detection.portal_host)
         record = TrustRecord(
             adapter_id=detection.adapter_id,
             portal_host=detection.portal_host,
@@ -330,6 +331,7 @@ class OnboardingWindow:
             allowed_hosts=(detection.portal_host,),
             cert_sha256=detection.observed_cert_sha256,
             fingerprint=detection.fingerprint,
+            entry_url=existing.entry_url if existing else "",
             network_hint=(
                 f"iface={self.ctx.engine_latest_snapshot().interface} "
                 f"gw={self.ctx.engine_latest_snapshot().gateway}"
