@@ -338,6 +338,8 @@ class ZstuAdapter:
                 continue  # 候选直通(被放行)——试下一个找门户
             if result.status == 404:
                 continue  # 候选不存在(测试/环境无此站)——试下一个
+            if self._portal_host_of(result.url) is None:
+                continue  # 直通但不是门户(白名单放行的普通站)——试下一个
             return client, result
         return client, None  # 全部候选直通(204)——"假在线"弱信号,由调用方按语义处理
 

@@ -246,14 +246,41 @@ class Engine:
             self._advance(Phase.MATCHING)
             matched: DetectionResult | None = None
             matched_adapter: PortalAdapter | None = None
+            fingerprint_mismatch = None
             for adapter in self._registry.all():
                 try:
                     detection = adapter.detect(self._context(snap, generation))
                 except GenerationStale:
                     return self._cancelled(snap)
-                if detection.matched:
-                    matched, matched_adapter = detection, adapter
-                    break
+                if not detection.matched:
+                    continue
+                # 信任指纹前置校验:已信任门户的证书/页面指纹与本轮观测不符
+                # (同网段冒名响应/门户整体迁移),不信此 detection,继续找
+                # (2026-10-28 现场教训:zjlib 的 404 语义在浙理工校园网被
+                #  公网 2.2.1.1 的 404 响应者误触发)。
+                rec = self._trust.lookup(detection.adapter_id, detection.portal_host or "")
+                if rec is not None and not self._trust.signature_matches(
+                    rec, detection.fingerprint, detection.observed_cert_sha256
+                ):
+                    if fingerprint_mismatch is None:
+                        fingerprint_mismatch = (detection, adapter)
+                    self._log.event("detect_fingerprint_mismatch",
+                                    adapter=detection.adapter_id,
+                                    host=detection.portal_host)
+                    continue
+                matched, matched_adapter = detection, adapter
+                break
+            if matched is None and fingerprint_mismatch is not None:
+                # 没有别的门户可匹配,但已知门户特征确实变了 → 明确告知(A06)
+                det, adpt = fingerprint_mismatch
+                return self._finish(self._state(
+                    snap, generation, link=LinkState.READY,
+                    portal=PortalState.FAILED, internet=internet.state,
+                    phase=Phase.WAITING_USER, adapter_id=det.adapter_id,
+                    error=ErrorCode.PORTAL_CHANGED,
+                    detail=f"{adpt.name} 门户特征与已信任记录不一致，自动提交已暂停",
+                    evidence=det.evidence,
+                ))
 
             if internet.reachable and not (matched and matched.matched):
                 # 只有确实没有已知门户时，探针结论才可授予"无需登录"。
