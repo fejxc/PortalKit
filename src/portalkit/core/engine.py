@@ -152,20 +152,22 @@ class Engine:
         return data.get("session_expires_at")
 
     def session_predicted_expiry(self) -> str | None:
-        """学习值：基于历史重登间隔中位数的预计到期时间（keepalive 缺失时的补偿）。"""
-        best: datetime | None = None
-        for rec in self._trust.all():
-            median = self._trust.median_session_lifetime_hours(rec.adapter_id, rec.portal_host)
-            if median is None or not rec.last_auth_ok_at:
-                continue
-            try:
-                expiry = (datetime.fromisoformat(rec.last_auth_ok_at)
-                          + timedelta(hours=median))
-            except ValueError:
-                continue
-            if best is None or expiry > best:
-                best = expiry
-        return best.isoformat(timespec="seconds") if best else None
+        """学习值：基于**当前活跃网络**的历史重登间隔中位数预测到期时间。
+
+        按最近一次认证成功的受信记录取样本——不同 WiFi/门户的会话寿命
+        互不通用(2026-10-28 用户反馈),绝不跨网络套用。"""
+        rec = self._trust.latest_active()
+        if rec is None or not rec.last_auth_ok_at:
+            return None
+        median = self._trust.median_session_lifetime_hours(rec.adapter_id, rec.portal_host)
+        if median is None:
+            return None
+        try:
+            expiry = (datetime.fromisoformat(rec.last_auth_ok_at)
+                      + timedelta(hours=median))
+        except ValueError:
+            return None
+        return expiry.isoformat(timespec="seconds")
 
     def request_cancel(self) -> None:
         """请求取消当前任务：立即推进 network_generation，在途步骤在

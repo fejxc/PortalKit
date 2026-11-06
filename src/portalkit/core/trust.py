@@ -159,6 +159,13 @@ class TrustRegistry:
             self._save()
             return rec
 
+    def latest_active(self) -> TrustRecord | None:
+        """最近一次认证成功的受信记录(= 当前活跃网络的门户)。"""
+        candidates = [r for r in self._records.values() if r.last_auth_ok_at]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda r: r.last_auth_ok_at)
+
     def median_session_lifetime_hours(self, adapter_id: str, portal_host: str) -> float | None:
         rec = self._records.get(f"{adapter_id}:{portal_host}")
         samples = rec.session_lifetime_samples if rec else None
