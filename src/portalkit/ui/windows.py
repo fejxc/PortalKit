@@ -231,6 +231,61 @@ def _fmt_local(iso_ts: str) -> str:
         return "—"
 
 
+def _fmt_expiry(iso_ts: str | None) -> str | None:
+    """会话有效期 → 用户可读短格式；**已过去则明确说"已过期"**。
+
+    背景（v1.3.1）：学习值会随时间自然过期，如实显示原 ISO 串会让用户
+    误以为会话仍有效。坏值/空返回 None（不显示，坏 ISO 不该给用户看）。
+    """
+    if not iso_ts:
+        return None
+    try:
+        from datetime import datetime, timezone
+
+        dt = datetime.fromisoformat(iso_ts)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    short = dt.astimezone().strftime("%m-%d %H:%M")
+    if dt <= datetime.now(timezone.utc):
+        return f"已于 {short} 过期"
+    return short
+
+
+def _group_hex(value: str | None) -> str:
+    """64 位 hex 指纹每 16 位分组（信任确认时逐段核对）；其他值原样。"""
+    cleaned = (value or "").strip()
+    if len(cleaned) == 64 and all(c in "0123456789abcdefABCDEF" for c in cleaned):
+        return " ".join(cleaned[i:i + 16] for i in range(0, 64, 16))
+    return cleaned
+
+
+def mask_username(username: str | None) -> str:
+    """账号打码：长账号（>8 位）保留前 2 后 4，中间掩码——防旁人瞥屏。
+
+    短账号（学号等）打码没有可读性收益，原样显示。
+    """
+    u = username or ""
+    if len(u) <= 8:
+        return u
+    return u[:2] + "•" * (len(u) - 6) + u[-4:]
+
+
+def _resolve_username(entered: str, prefill_real: str) -> str:
+    """凭据窗口保存时的账号解析：未修改打码显示 → 还原真实账号。
+
+    输入含 • 但又不等于打码显示 → 视为录入错误（抛 ValueError 由调用方
+    提示），绝不把掩码字符存进 Keychain。
+    """
+    entered = entered.strip()
+    if prefill_real and entered == mask_username(prefill_real):
+        return prefill_real
+    if "•" in entered:
+        raise ValueError("账号包含掩码字符，请输入完整账号（或清空后重新输入）")
+    return entered
+
+
 def _record_detail(rec: TrustRecord) -> str:
     lines = [
         f"适配器:   {rec.adapter_id}",
@@ -238,8 +293,8 @@ def _record_detail(rec: TrustRecord) -> str:
         f"允许宿主: {', '.join(rec.allowed_hosts)}",
         f"自动认证: {'开启' if rec.auto_auth else '关闭'}",
         f"上次连接: {_fmt_local(rec.last_connected_at)}",
-        f"页面指纹: {rec.fingerprint or '未固定'}",
-        f"证书指纹: {rec.cert_sha256 or '未固定'}",
+        f"页面指纹: {_group_hex(rec.fingerprint) or '未固定'}",
+        f"证书指纹: {_group_hex(rec.cert_sha256) or '未固定'}",
         f"信任时间: {_fmt_local(rec.created_at) if rec.created_at else '未知'}",
         f"网络线索: {rec.network_hint or '-'}",
     ]
@@ -306,8 +361,8 @@ class OnboardingWindow:
                 scheme = detection.portal_scheme or "https"
                 lines = [
                     f"识别到门户：{scheme}://{detection.portal_host}:{detection.portal_port}",
-                    f"页面指纹：{detection.fingerprint or '-'}",
-                    f"证书指纹：{detection.observed_cert_sha256 or '-'}",
+                    f"页面指纹：{_group_hex(detection.fingerprint) or '-'}",
+                    f"证书指纹：{_group_hex(detection.observed_cert_sha256) or '-'}",
                     "",
                     "匹配证据：",
                     *[f"  · {e}" for e in detection.evidence],
@@ -367,6 +422,7 @@ class CredentialsWindow:
     def __init__(self, ctx: "UIContext") -> None:
         self.ctx = ctx
         self.win = _window("PortalKit — 凭据", 420, 226)
+        self._prefill_real = ""  # 文本框当前显示的打码账号对应的真实账号（""=无）
         form = FormLayout(self.win.contentView(), width=380, top=184)
         form.label("选择受信网络", bold=True)
         self.popup = form.popup([])
@@ -392,7 +448,9 @@ class CredentialsWindow:
                 if sibling is not None:
                     names = self.ctx.credentials.usernames(sibling.adapter_id, sibling.portal_host)
                     username = names[0] if names else ""
-        self.username.setStringValue_(username or "")
+        # 旁人瞥屏防护：长账号只显示掩码；_save 用 _prefill_real 还原
+        self._prefill_real = username or ""
+        self.username.setStringValue_(mask_username(username))
 
     def _records(self) -> list[TrustRecord]:
         return self.ctx.trust.all()
@@ -428,7 +486,12 @@ class CredentialsWindow:
         rec = self._selected()
         if rec is None:
             return
-        username = str(self.username.stringValue()).strip()
+        entered = str(self.username.stringValue()).strip()
+        try:
+            username = _resolve_username(entered, self._prefill_real)
+        except ValueError as exc:
+            _confirm("账号无效", str(exc), "知道了")
+            return
         password = str(self.password.stringValue())
         if not username or not password:
             _confirm("信息不完整", "账号与密码不能为空。", "知道了")
@@ -438,7 +501,7 @@ class CredentialsWindow:
         self.password.setStringValue_("")  # 保存后清空明文，避免残留
         _confirm(
             "已保存",
-            f"凭据已写入 Keychain（{rec.portal_host} · 账号 {username}）。\n"
+            f"凭据已写入 Keychain（{rec.portal_host} · 账号 {mask_username(username)}）。\n"
             "点击菜单栏「立即认证」执行认证。",
             "好",
         )
@@ -623,9 +686,17 @@ def _readable_events(ctx: "UIContext", tail: int = 40, only_issues: bool = False
         elif ev == "system_wake":
             items.append(("sys", item.get("ts", ""), "系统唤醒，正在重新检查"))
     lines = []
+    # 连续相同事件合并（兜底检查每 30~120s 落一条"已联网"，时间线会被
+    # 正常项刷屏——v1.3.1）。倒序后相邻同文本折叠为一条，显示 ×N。
+    merged: list[list] = []  # [clock, text, count]
     for kind, ts, text in reversed(items[-tail:]):
         clock = ts[11:19] if len(ts) >= 19 else ts  # ISO → HH:MM:SS
-        lines.append(f"{clock}  {text}")
+        if merged and merged[-1][1] == text:
+            merged[-1][2] += 1
+        else:
+            merged.append([clock, text, 1])
+    for clock, text, count in merged:
+        lines.append(f"{clock}  {text}" + (f"（×{count}）" if count > 1 else ""))
     return lines
 
 
@@ -640,13 +711,20 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
         lines.append("物理网络: 未连接")
     expiry = None
     if ctx.engine is not None:
-        expiry = ctx.engine.session_expires_at()
-    if expiry:
-        lines.append(f"会话预计有效至: {expiry}")
-    elif ctx.engine is not None:
-        predicted = ctx.engine.session_predicted_expiry()
-        if predicted:
-            lines.append(f"会话预计有效至: {predicted}（学习值，按历史重登间隔估计）")
+        # 会话有效期：门户 keepalive 优先，学习值兜底；已过去必须明说
+        # （v1.3.1 修复：学习值过期后仍以现在时显示，误导用户会话仍有效）
+        for label, iso in (
+            ("门户 keepalive 估计", ctx.engine.session_expires_at()),
+            ("学习值，按历史重登间隔估计", ctx.engine.session_predicted_expiry()),
+        ):
+            rendered = _fmt_expiry(iso)
+            if rendered is None:
+                continue
+            if rendered.startswith("已于"):
+                lines.append(f"会话{rendered}（{label}）；点「立即认证」刷新")
+            else:
+                lines.append(f"会话预计有效至: {rendered}（{label}）")
+            break
     if ctx.engine is not None and getattr(ctx.engine, "stats", None) is not None:
         summary = ctx.engine.stats.summary_today()
         if summary:
