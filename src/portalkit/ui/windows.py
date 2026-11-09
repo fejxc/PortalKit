@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Callable
 from AppKit import (
     NSAlert,
     NSAlertFirstButtonReturn,
+    NSAlertSecondButtonReturn,
     NSBackingStoreBuffered,
     NSBox,
     NSButton,
@@ -212,6 +213,42 @@ def _confirm(title: str, info: str, ok: str) -> bool:
     return alert.runModal() == NSAlertFirstButtonReturn
 
 
+def _revoke_choice(rec: TrustRecord) -> int:
+    """撤销信任的三选一确认：0=撤销 1=撤销并删除凭据 2=取消。
+
+    语义断点修复（v1.3.2）：此前"想连凭据一起删"必须自己再去凭据窗口
+    操作一遍；把两条路径放进同一个确认，后果一次说清。
+    """
+    alert = NSAlert.alloc().init()
+    alert.setMessageText_("撤销信任")
+    alert.setInformativeText_(
+        f"撤销 [{rec.adapter_id}] {rec.portal_host}:{rec.portal_port} 的信任？\n\n"
+        "撤销后此网络不再自动认证，下次进入需重新确认信任（可随时重加）。"
+    )
+    alert.addButtonWithTitle_("撤销信任（保留凭据）")
+    alert.addButtonWithTitle_("撤销并删除凭据")
+    alert.addButtonWithTitle_("取消")
+    alert.setAlertStyle_(1)  # NSWarningAlertStyle
+    state = alert.runModal()
+    if state == NSAlertFirstButtonReturn:
+        return 0
+    if state == NSAlertSecondButtonReturn:
+        return 1
+    return 2
+
+
+def _purge_credentials(ctx, rec: TrustRecord) -> int:
+    """删除该信任记录在 Keychain 的全部账号；返回删除数。"""
+    count = 0
+    for username in ctx.credentials.usernames(rec.adapter_id, rec.portal_host):
+        if ctx.credentials.delete(rec.adapter_id, rec.portal_host, username):
+            count += 1
+    if count:
+        ctx.logger.event("credentials_purged", adapter=rec.adapter_id,
+                         host=rec.portal_host, count=count)
+    return count
+
+
 def _trust_titles(records: list[TrustRecord]) -> list[str]:
     return [f"[{r.adapter_id}] {r.portal_host}:{r.portal_port} ({r.scheme})" for r in records]
 
@@ -293,7 +330,7 @@ def _record_detail(rec: TrustRecord) -> str:
         f"允许宿主: {', '.join(rec.allowed_hosts)}",
         f"自动认证: {'开启' if rec.auto_auth else '关闭'}",
         f"上次连接: {_fmt_local(rec.last_connected_at)}",
-        f"页面指纹: {_group_hex(rec.fingerprint) or '未固定'}",
+        f"页面指纹: {_group_hex(rec.fingerprint) or '未固定（旧版本建立；重新添加可信网络可更新）'}",
         f"证书指纹: {_group_hex(rec.cert_sha256) or '未固定'}",
         f"信任时间: {_fmt_local(rec.created_at) if rec.created_at else '未知'}",
         f"网络线索: {rec.network_hint or '-'}",
@@ -476,6 +513,17 @@ class CredentialsWindow:
             self.popup.addItemsWithTitles_(_trust_titles(records))
         self._picked()
 
+    def focus_record(self, adapter_id: str, portal_host: str) -> None:
+        """定位到指定信任记录（管理窗口跳转时保持上下文，不落回第一项）。
+
+        在 show() 之后调用——refresh 会重置选中项，focus 是最后一步。
+        """
+        for idx, rec in enumerate(self._records()):
+            if rec.adapter_id == adapter_id and rec.portal_host == portal_host:
+                self.popup.selectItemAtIndex_(idx)
+                break
+        self._picked()
+
     def show(self) -> None:
         self.refresh()
         self.win.makeKeyAndOrderFront_(None)
@@ -536,8 +584,11 @@ class ManagerWindow:
         self._auto_bridge = _ActionBridge.alloc().initWithCallback_(self._auto_changed)
         self.auto_toggle.setTarget_(self._auto_bridge)
         self.auto_toggle.setAction_("call:")
-        c.addSubview_(_button(NSMakeRect(20, 28, 120, 32), "撤销信任", self._revoke))
-        c.addSubview_(_button(NSMakeRect(160, 28, 120, 32), "编辑凭据", self._edit_creds))
+        # 按钮保存引用：空记录态禁用，杜绝"点了没反应"（v1.3.2）
+        self.revoke_btn = _button(NSMakeRect(20, 28, 120, 32), "撤销信任", self._revoke)
+        c.addSubview_(self.revoke_btn)
+        self.creds_btn = _button(NSMakeRect(160, 28, 120, 32), "编辑凭据", self._edit_creds)
+        c.addSubview_(self.creds_btn)
         c.addSubview_(_button(NSMakeRect(320, 28, 120, 32), "刷新", self.refresh))
         self._bridge = _ActionBridge.alloc().initWithCallback_(self._picked)
         self.popup.setTarget_(self._bridge)
@@ -557,6 +608,14 @@ class ManagerWindow:
         self.auto_toggle.setState_(
             NSControlStateValueOn if (rec and rec.auto_auth) else NSControlStateValueOff
         )
+        self._sync_enabled(rec)
+
+    def _sync_enabled(self, rec) -> None:
+        """空记录态禁用全部操作控件——禁用是明确的反馈，静默 return 不是。"""
+        has = rec is not None
+        self.revoke_btn.setEnabled_(has)
+        self.creds_btn.setEnabled_(has)
+        self.auto_toggle.setEnabled_(has)
 
     def _auto_changed(self) -> None:
         rec = self._selected()
@@ -567,6 +626,9 @@ class ManagerWindow:
             self.ctx.trust.update_auto_auth(rec.adapter_id, rec.portal_host, enabled)
             self.ctx.logger.event("auto_auth_toggled", adapter=rec.adapter_id,
                                   host=rec.portal_host, enabled=enabled)
+            # 详情区同步刷新，否则"自动认证: 开启/关闭"显示旧值（v1.3.2）
+            updated = self.ctx.trust.lookup(rec.adapter_id, rec.portal_host)
+            self.detail_tv.setString_(_record_detail(updated or rec))
 
     def refresh(self) -> None:
         records = self._records()
@@ -585,19 +647,18 @@ class ManagerWindow:
         rec = self._selected()
         if rec is None:
             return
-        if not _confirm(
-            "撤销信任",
-            f"撤销 [{rec.adapter_id}] {rec.portal_host}:{rec.portal_port} 的信任？\n"
-            "此后该网络不再自动认证；是否同时删除 Keychain 凭据可在凭据窗口操作。此操作可随时重新信任。",
-            "撤销信任",
-        ):
+        choice = _revoke_choice(rec)
+        if choice == 2:
             return
         self.ctx.trust.revoke(rec.adapter_id, rec.portal_host)
         self.ctx.logger.event("trust_revoked", adapter=rec.adapter_id, host=rec.portal_host)
+        if choice == 1:
+            _purge_credentials(self.ctx, rec)
         self.refresh()
 
     def _edit_creds(self) -> None:
-        self.ctx.open_credentials()
+        # 带上当前选中记录：凭据窗口直接定位，不落回第一项（v1.3.2）
+        self.ctx.open_credentials(self._selected())
 
 
 # --------------------------------------------------------------- diagnostics

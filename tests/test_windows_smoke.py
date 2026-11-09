@@ -36,6 +36,16 @@ def app_shell():
     yield
 
 
+class _FakeLogger:
+    """生产契约：ctx.logger 恒可用（menubar 注入 RedactedLogger）。"""
+
+    def __init__(self):
+        self.events: list[tuple] = []
+
+    def event(self, *args, **kwargs):
+        self.events.append((args, kwargs))
+
+
 @pytest.fixture()
 def ctx(tmp_path):
     c = UIContext(
@@ -46,7 +56,7 @@ def ctx(tmp_path):
         settings=SettingsStore(tmp_path / "settings.json"),
         state_dir=tmp_path,
     )
-    c.logger = None
+    c.logger = _FakeLogger()
     return c
 
 
@@ -146,3 +156,88 @@ def test_credentials_window_masks_saved_username(app_shell, ctx, monkeypatch):
     creds.refresh()
     assert creds.username.stringValue() == mask_username(real)
     assert creds._prefill_real == real  # 保存时可还原
+
+
+# ---------------------------------------- v1.3.2 管理窗交互逻辑回归
+
+def _trust_pair(ctx):
+    for adapter, host, port in (("zjlib", "2.2.1.1", 8443), ("zstu", "192.168.102.166", 80)):
+        ctx.trust.add(TrustRecord(
+            adapter_id=adapter, portal_host=host, portal_port=port,
+            scheme="https", allowed_hosts=(host,), fingerprint=f"fp-{host}",
+        ))
+
+
+def test_manager_empty_state_disables_actions(app_shell, ctx):
+    """空记录态：撤销/编辑凭据/自动认证开关全部禁用——杜绝"点了没反应"。"""
+    manager = ManagerWindow(ctx)
+    manager.refresh()
+    assert manager._selected() is None
+    assert manager.revoke_btn.isEnabled() is False
+    assert manager.creds_btn.isEnabled() is False
+    assert manager.auto_toggle.isEnabled() is False
+
+
+def test_manager_with_record_enables_actions(app_shell, ctx):
+    _trust_pair(ctx)
+    manager = ManagerWindow(ctx)
+    manager.refresh()
+    assert manager.revoke_btn.isEnabled() is True
+    assert manager.auto_toggle.isEnabled() is True
+
+
+def test_manager_toggle_updates_detail_text(app_shell, ctx):
+    """切换自动认证后详情区"自动认证:"必须同步（v1.3.1 前 display 旧值）。"""
+    _trust_pair(ctx)
+    manager = ManagerWindow(ctx)
+    manager.refresh()
+    manager.auto_toggle.setState_(0)  # NSControlStateValueOff
+    manager._auto_changed()
+    assert "自动认证: 关闭" in manager.detail_tv.string()
+    manager.auto_toggle.setState_(1)
+    manager._auto_changed()
+    assert "自动认证: 开启" in manager.detail_tv.string()
+
+
+def test_credentials_focus_record_selects_target(app_shell, ctx):
+    """管理窗跳转：凭据窗口必须定位到指定记录，不落回第一项。"""
+    _trust_pair(ctx)
+    creds = CredentialsWindow(ctx)
+    creds.show()
+    creds.focus_record("zstu", "192.168.102.166")
+    assert creds.popup.indexOfSelectedItem() == 1
+    assert "192.168.102.166" in creds.popup.titleOfSelectedItem()
+
+
+def test_credentials_focus_unknown_keeps_first(app_shell, ctx):
+    _trust_pair(ctx)
+    creds = CredentialsWindow(ctx)
+    creds.show()
+    creds.focus_record("nope", "0.0.0.0")  # 未匹配 → 保持默认选中
+    assert creds.popup.indexOfSelectedItem() == 0
+
+
+def test_purge_credentials_deletes_all_accounts(app_shell, ctx, monkeypatch):
+    """撤销并删除凭据：逐账号删除并计数。"""
+    _trust_pair(ctx)
+    rec = ctx.trust.lookup("zjlib", "2.2.1.1")
+    deleted = []
+    monkeypatch.setattr(ctx.credentials, "usernames", lambda a, h: ["u1", "u2"], raising=False)
+    monkeypatch.setattr(
+        ctx.credentials, "delete",
+        lambda a, h, u: deleted.append((a, h, u)) or True, raising=False,
+    )
+    from portalkit.ui.windows import _purge_credentials
+    assert _purge_credentials(ctx, rec) == 2
+    assert deleted == [("zjlib", "2.2.1.1", "u1"), ("zjlib", "2.2.1.1", "u2")]
+
+
+def test_unfixed_fingerprint_hint(app_shell, ctx):
+    """旧记录无页面指纹时给出解释，不再裸露"未固定"。"""
+    ctx.trust.add(TrustRecord(
+        adapter_id="zjlib", portal_host="2.2.1.1", portal_port=8443,
+        scheme="https", allowed_hosts=("2.2.1.1",), fingerprint="",
+    ))
+    manager = ManagerWindow(ctx)
+    manager.refresh()
+    assert "重新添加可信网络可更新" in manager.detail_tv.string()

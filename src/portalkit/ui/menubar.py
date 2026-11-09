@@ -160,7 +160,8 @@ class UIContext:
     # ---- 回调由宿主注入（窗口 → 宿主命令，绝不直接触碰引擎线程）
     request_check: Callable[[], None] = lambda: None
     request_authenticate: Callable[[], None] = lambda: None
-    open_credentials: Callable[[], None] = lambda: None
+    # open_credentials(record=None)：record 非 None 时凭据窗口定位到该记录
+    open_credentials: Callable[..., None] = lambda *args, **kwargs: None
     on_settings_changed: Callable[[], None] = lambda: None
     logger = None  # RedactedLogger；由宿主赋值
 
@@ -446,7 +447,7 @@ class PortalKitStatusBar:
         self._wifi_settings_item.setHidden_(True)
         menu.addItem_(NSMenuItem.separatorItem())
         add("添加 / 确认可信网络…", self._on_onboarding)
-        add("录入 / 更新凭据…", self._on_credentials)
+        add("录入 / 更新凭据…", self._on_credentials_menu)
         add("管理可信网络…", self._on_manage)
         add("诊断与日志…", self._on_diagnostics)
         add("设置…", self._on_settings)
@@ -523,10 +524,17 @@ class PortalKitStatusBar:
         self._holder.set_detection(None)
         self.worker.submit("detect")
 
-    def _on_credentials(self, _sender=None) -> None:
+    def _on_credentials_menu(self) -> None:
+        self._on_credentials()
+
+    def _on_credentials(self, record=None) -> None:
+        """打开凭据窗口；record 非 None 时定位到该信任记录（管理窗跳转）。"""
         if "credentials" not in self._windows:
             self._windows["credentials"] = CredentialsWindow(self.ctx)
-        self._windows["credentials"].show()
+        win = self._windows["credentials"]
+        win.show()
+        if record is not None:
+            win.focus_record(record.adapter_id, record.portal_host)
 
     def _on_manage(self) -> None:
         if "manage" not in self._windows:
