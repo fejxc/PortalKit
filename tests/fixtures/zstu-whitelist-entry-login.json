@@ -1,0 +1,23 @@
+{
+  "name": "zstu-whitelist-entry-login",
+  "scenario": "同上现场：配置门户入口 URL 后，authenticate 直连入口引导会话并成功登录（白名单环境下唯一可靠途径）",
+  "adapter": "zstu",
+  "entry_url": "/eportal/index.jsp?wlanuserip=10.1.2.3&mac=AA-BB-CC-DD-EE-FF&url=http%3A%2F%2Fexample.com%2F",
+  "routes": [
+    {"method": "GET", "path": "/generate_204", "status": 204},
+    {"method": "GET", "path": "/connecttest.txt", "status": 204},
+    {"method": "GET", "path": "/ns", "status": 204},
+    {"method": "GET", "path": "/ex", "status": 204},
+    {"method": "GET", "path": "/eportal/index.jsp", "status": 200, "body": "<html>ePortal login page</html>"},
+    {"method": "POST", "path": "/eportal/InterFace.do", "by_method": {
+      "pageInfo": {"status": 200, "json": {"passwordEncrypt": "false", "prefixName": "false", "validCodeUrl": ""}},
+      "getServices": {"status": 200, "json": {"isService": "false", "defaultService": "", "serviceJson": "[]"}},
+      "login": {"status": 200, "json": {"result": "success", "keepaliveInterval": 1440}}
+    }}
+  ],
+  "run": "authenticate",
+  "expect": {
+    "code": "success",
+    "request_to": ["/eportal/InterFace.do"]
+  }
+}

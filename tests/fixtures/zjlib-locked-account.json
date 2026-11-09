@@ -1,0 +1,17 @@
+{
+  "name": "zjlib-locked-account",
+  "scenario": "现场：门户拒绝认证并提示账号锁定 → 必须给账号受限码与自助服务行动指引，而非笼统的认证失败",
+  "adapter": "zjlib",
+  "entry_url": "/cn/index.html",
+  "routes": [
+    {"method": "GET", "path": "/cn/index.html", "status": 200, "body": "<html><body><iframe src=\"/cn/login.html\" width=\"100%\"></iframe></body></html>"},
+    {"method": "GET", "path": "/cn/login.html", "status": 200, "body": "<html><body><form name=\"LoginForm\" action=\"/cn/login\" method=\"post\"><input type=\"text\" name=\"username\" id=\"username\"><input type=\"password\" name=\"password\" id=\"password\"><input type=\"hidden\" name=\"RedirectUrl\" value=\"\"><input type=\"hidden\" name=\"anonymous\" value=\"DISABLE\"><input type=\"hidden\" name=\"anonymousurl\" value=\"\"><input type=\"checkbox\" name=\"checkbox\" value=\"on\" checked><input type=\"checkbox\" name=\"checkbox1\" value=\"on\" checked><input type=\"hidden\" name=\"accesscode\" value=\"\"></form></body></html>"},
+    {"method": "POST", "path": "/cn/login", "status": 200, "body": "<html>Error: 该账号已被锁定，请到自助服务网站处理。</html>"}
+  ],
+  "run": "authenticate",
+  "expect": {
+    "code": "account_locked",
+    "recovery_hint": "自助服务",
+    "request_to": ["/cn/login"]
+  }
+}

@@ -17,7 +17,8 @@ from portalkit.core.settings import ALLOWED_INTERVALS_S, SettingsStore
 from portalkit.core.trust import TrustRecord, TrustRegistry
 
 SCHEMA = 1
-_SETTING_KEYS = ("auto_auth", "notify_on_error", "check_interval_s")
+_SETTING_KEYS = ("auto_auth", "notify_on_error", "check_interval_s",
+                 "auto_check_updates", "share_anonymous_stats")
 
 
 def export_config(trust: TrustRegistry, settings: SettingsStore, path: Path) -> int:

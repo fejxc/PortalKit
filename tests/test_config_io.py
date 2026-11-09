@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from portalkit.core.config_io import export_config, import_config
+from portalkit.core.config_io import _SETTING_KEYS, export_config, import_config
 from portalkit.core.settings import SettingsStore
 from portalkit.core.trust import TrustRecord, TrustRegistry
 
@@ -33,7 +33,7 @@ def test_export_import_roundtrip(tmp_path):
 
     fresh_trust, fresh_settings = TrustRegistry(tmp_path / "t2"), SettingsStore(tmp_path / "s2.json")
     n_t, n_s = import_config(fresh_trust, fresh_settings, export_path)
-    assert (n_t, n_s) == (2, 3)  # 信任 2 条;设置白名单 3 项(launch_at_login 不迁移)
+    assert (n_t, n_s) == (2, len(_SETTING_KEYS))  # 信任 2 条;设置白名单全量(launch_at_login 不迁移)
     assert len(fresh_trust.all()) == 2
     imported = fresh_trust.lookup("zjlib", "2.2.1.1")
     assert imported.cert_sha256 == "a" * 64 and imported.auto_auth is True

@@ -100,7 +100,7 @@ portalkit startup install|status  # 登录自启（LaunchAgent）
 | 浙江图书馆 Wi-Fi（2.2.1.1:8443，大学路馆区 / 城市书房） | `zjlib` | 自签 HTTPS，iframe 登录页 + Mac 端 XHR 七字段；**404 = 已认证** | ✅ 真实网络回归通过 |
 | 浙江理工大学校园网 ePortal | `zstu` | 302 动态发现 → pageInfo 动态 RSA 公钥 → getServices → 双重编码提交；**204 = 已在线** | ⚠️ 已按真实流程实现，待现场回归 |
 
-新增门户 = 实现一个 Python 适配器（`src/portalkit/adapters/`，参照 `base.py` 契约与现有两例），协议私有逻辑留在适配器内，绑定 / 重试 / 信任 / 凭据全部由 core 提供。
+新增门户有两条路：**ePortal 家族站点只需一份配置**——编辑 `~/Library/Application Support/PortalKit/eportal_sites.json`（格式见 `src/portalkit/adapters/eportal_sites.py` 文档字符串），无需写代码、无需等待发版；其他协议按适配器契约开发（`src/portalkit/adapters/base.py`，参照现有实现），协议私有逻辑留在适配器内，绑定 / 重试 / 信任 / 凭据全部由 core 提供。
 
 ## 安全设计
 

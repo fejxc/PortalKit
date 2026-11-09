@@ -146,6 +146,21 @@ def test_authenticate_invalid_credentials(portal):
     assert result.code == AuthCode.INVALID_CREDENTIALS
 
 
+def test_authenticate_arrears_classified_account_locked(portal):
+    """欠费文案含"账号"二字 → 必须归账号受限而非凭据错误（分类表按序）。"""
+    _routes(portal, login_result={"result": "fail", "message": "账号已欠费，请充值"})
+    result = _adapter(portal).authenticate(make_ctx(portal), Credentials("stu", "pw"))
+    assert result.code == AuthCode.ACCOUNT_LOCKED
+    assert "自助服务" in result.recovery_hint  # 行动指引必须随码给出
+
+
+def test_authenticate_quota_classified_auth_quota(portal):
+    _routes(portal, login_result={"result": "fail", "message": "终端数已达上限"})
+    result = _adapter(portal).authenticate(make_ctx(portal), Credentials("stu", "pw"))
+    assert result.code == AuthCode.AUTH_QUOTA
+    assert "其他设备" in result.recovery_hint
+
+
 def test_authenticate_validcode_interaction_required(portal):
     _routes(portal, login_result={
         "result": "fail", "message": "验证码错误",

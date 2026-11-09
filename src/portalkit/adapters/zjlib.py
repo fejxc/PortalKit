@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from hashlib import sha256
 
 from portalkit.adapters.base import AdapterContext, AuthResult, Credentials, DetectionResult, ProtocolVerifyResult
+from portalkit.adapters.classify import MESSAGE_KEY_BY_CODE, classify_portal_message
 from portalkit.models import AuthCode
 from portalkit.network.http import HTTPResult, NetworkRequestError
 
@@ -40,7 +41,6 @@ _SUCCESS_TOKENS = (
     "auth_success.html", "success", "logout", "user has online",
     "已登录", "认证成功", "登录成功", "用户已在线",
 )
-_CRED_ERROR_TOKENS = ("用户名", "密码", "username", "password", "账号")
 
 
 @dataclass
@@ -289,12 +289,13 @@ class ZjlibAdapter:
             return AuthResult(AuthCode.SUCCESS, "status.authenticating_done",
                               evidence=(f"submit http {result.status}, success markers seen",))
         snippet = re.sub(r"\s+", " ", result.text).strip()[:160]
-        lowered = result.text.lower()
-        if any(t in lowered for t in _CRED_ERROR_TOKENS) and (
-            "error" in lowered or "失败" in result.text or "错误" in result.text
-        ):
-            return AuthResult(AuthCode.INVALID_CREDENTIALS, "error.invalid_creds",
-                              evidence=("portal reported credential error", snippet))
+        # 失败分类走跨适配器共享表（欠费/锁定 → 设备上限 → 凭据，按序匹配）
+        classified = classify_portal_message(snippet)
+        if classified is not None:
+            code, hint = classified
+            return AuthResult(code, MESSAGE_KEY_BY_CODE[code],
+                              evidence=("portal reported failure", snippet),
+                              recovery_hint=hint)
         return AuthResult(AuthCode.UNKNOWN_ERROR, "status.action_required",
                           evidence=("no success marker", snippet))
 

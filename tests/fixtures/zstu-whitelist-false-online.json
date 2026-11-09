@@ -1,0 +1,16 @@
+{
+  "name": "zstu-whitelist-false-online",
+  "scenario": "2026-10-28 浙理工现场：校园网白名单放行连通性检测域名，认证前即 204 = 假在线；此时绝不提交凭据（防互踢真实会话）",
+  "adapter": "zstu",
+  "routes": [
+    {"method": "GET", "path": "/generate_204", "status": 204},
+    {"method": "GET", "path": "/connecttest.txt", "status": 204},
+    {"method": "GET", "path": "/ns", "status": 204},
+    {"method": "GET", "path": "/ex", "status": 204}
+  ],
+  "run": "authenticate",
+  "expect": {
+    "code": "already_authenticated",
+    "no_request_to": ["/eportal/InterFace.do"]
+  }
+}

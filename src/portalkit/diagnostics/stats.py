@@ -93,3 +93,29 @@ class LocalStats:
                 avg_s = sum(durations) / len(durations) / 1000
                 parts.append(f"平均耗时 {avg_s:.1f}s")
         return " · ".join(parts)
+
+    def telemetry_summary(self) -> dict | None:
+        """可选匿名遥测摘要（默认关，见 Settings.share_anonymous_stats）。
+
+        只含当日聚合计数与最常见失败码——无用户标识、无主机、无凭据、
+        无自由文本。None = 今日无数据，请求侧不应附带任何遥测内容。
+        """
+        with self._lock:
+            data = self._data if self._data.get("date") == date.today().isoformat() else self._blank()
+        auth = data.get("auth", {})
+        total = sum(auth.values())
+        checks = int(data.get("checks", 0))
+        if total == 0 and checks == 0:
+            return None
+        ok = sum(n for code, n in auth.items() if code in _OK_CODES)
+        fail_codes = {c: n for c, n in auth.items() if c not in _OK_CODES}
+        top_fail = max(fail_codes, key=fail_codes.get) if fail_codes else None
+        summary: dict = {
+            "checks": checks,
+            "auth_total": total,
+            "auth_ok": ok,
+            "auth_fail": total - ok,
+        }
+        if top_fail:
+            summary["top_fail_code"] = top_fail
+        return summary

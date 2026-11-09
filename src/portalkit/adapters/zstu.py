@@ -27,6 +27,7 @@ from hashlib import sha256
 from urllib.parse import quote, unquote, urljoin, urlsplit
 
 from portalkit.adapters.base import AdapterContext, AuthResult, Credentials, DetectionResult, ProtocolVerifyResult
+from portalkit.adapters.classify import MESSAGE_KEY_BY_CODE, classify_portal_message
 from portalkit.models import AuthCode
 from portalkit.network.http import HTTPResult, NetworkRequestError, UntrustedRedirectError
 
@@ -283,10 +284,12 @@ def _classify_login_result(result: HTTPResult) -> AuthResult:
     if value.get("validCodeUrl"):
         return AuthResult(AuthCode.INTERACTION_REQUIRED, "error.interaction_required",
                           evidence=("portal requires validcode",))
-    lowered = message.lower()
-    if any(token in lowered for token in ("密码", "用户名", "password", "username", "账号")):
-        return AuthResult(AuthCode.INVALID_CREDENTIALS, "error.invalid_creds",
-                          evidence=(message,))
+    # 失败分类走跨适配器共享表（欠费/锁定先于凭据匹配——欠费文案常含"账号"）
+    classified = classify_portal_message(message)
+    if classified is not None:
+        code, hint = classified
+        return AuthResult(code, MESSAGE_KEY_BY_CODE[code],
+                          evidence=(message,), recovery_hint=hint)
     return AuthResult(AuthCode.UNKNOWN_ERROR, "status.action_required",
                       evidence=(message or f"result={value.get('result')}",),
                       recovery_hint=f"门户返回：{message or '未知原因'}" if message else "")
@@ -349,7 +352,7 @@ class ZstuAdapter:
         try:
             client, result = self._discover(ctx, strict_hosts=None)
         except NetworkRequestError as exc:
-            return DetectionResult(matched=False, adapter_id=ADAPTER_ID,
+            return DetectionResult(matched=False, adapter_id=self.id,
                                    evidence=(f"discovery unreachable: {exc.reason}",))
         except UntrustedRedirectError as exc:
             host = self._portal_host_of(exc.url)
@@ -359,7 +362,7 @@ class ZstuAdapter:
             # 带旧会话参数的登录页在已放行状态下也永远伺服,把它当"待认证"
             # 会引发反复提交、互踢用户真实会话(2026-10-28 现场教训)。
             # entry_url 只在 authenticate(物理路径确认不通)时作最后手段。
-            return DetectionResult(matched=False, adapter_id=ADAPTER_ID,
+            return DetectionResult(matched=False, adapter_id=self.id,
                                    evidence=("all discovery candidates 204 = online (no portal hijack)",))
         host = self._portal_host_of(result.url)
         return self._match_redirect(host, result.url, cert=result.peer_cert_sha256)
@@ -367,14 +370,14 @@ class ZstuAdapter:
     def _match_redirect(self, host: str | None, url: str, *, cert: str | None,
                         extra: tuple[str, ...] = ()) -> DetectionResult:
         if host is None:
-            return DetectionResult(matched=False, adapter_id=ADAPTER_ID,
+            return DetectionResult(matched=False, adapter_id=self.id,
                                    evidence=("no eportal redirect observed",) + extra)
         path = urlsplit(url).path
         already = path.endswith("success.jsp")
         fingerprint = sha256(f"{host}|{'success' if already else 'login'}".encode()).hexdigest()[:16]
         port = urlsplit(url).port or (443 if urlsplit(url).scheme == "https" else 80)
         return DetectionResult(
-            matched=True, adapter_id=ADAPTER_ID,
+            matched=True, adapter_id=self.id,
             portal_scheme=urlsplit(url).scheme, portal_host=host, portal_port=port,
             fingerprint=fingerprint, already_authenticated=already, needs_trust=True,
             evidence=(f"eportal path: {path}",) + extra,

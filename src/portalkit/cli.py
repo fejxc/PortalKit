@@ -42,21 +42,31 @@ _ACTION_PHASES = {
 }
 
 
-def _build_engine(state_dir=None) -> Engine:
-    logger = RedactedLogger(
-        sink_path=(state_dir or DEFAULT_STATE_DIR) / "events.jsonl",
-        echo_stderr=False,
-    )
-    # 学生网等白名单放行探针域名的场景：从信任记录读取门户入口 URL 注入适配器
+def _build_adapters(state_dir=None) -> list:
+    """内置适配器 + 信任记录入口注入 + 用户自定义 ePortal 站点。"""
+    from portalkit.adapters.eportal_sites import adapters_from_sites
+
     trust = TrustRegistry()
+    # 学生网等白名单放行探针域名的场景：从信任记录读取门户入口 URL 注入适配器
     zstu_entry = next(
         (r.entry_url for r in trust.all()
          if r.adapter_id == "zstu" and r.entry_url),
         None,
     )
+    adapters: list = [ZjlibAdapter(), ZstuAdapter(entry_url=zstu_entry)]
+    adapters.extend(adapters_from_sites(state_dir or DEFAULT_STATE_DIR))
+    return adapters
+
+
+def _build_engine(state_dir=None) -> Engine:
+    logger = RedactedLogger(
+        sink_path=(state_dir or DEFAULT_STATE_DIR) / "events.jsonl",
+        echo_stderr=False,
+    )
+    trust = TrustRegistry()
     return Engine(
         monitor=NetworkMonitor(),
-        registry=AdapterRegistry([ZjlibAdapter(), ZstuAdapter(entry_url=zstu_entry)]),
+        registry=AdapterRegistry(_build_adapters(state_dir)),
         trust=trust,
         credentials=KeychainCredentialService(),
         logger=logger,
@@ -368,13 +378,8 @@ def cmd_trust_revoke(args) -> int:
 # --------------------------------------------------------- credentials 管理
 
 def _build_registry() -> AdapterRegistry:
-    """构造适配器注册表:zstu 注入信任记录里的门户入口 URL(如有)。"""
-    trust = TrustRegistry()
-    zstu_entry = next(
-        (r.entry_url for r in trust.all() if r.adapter_id == "zstu" and r.entry_url),
-        None,
-    )
-    return AdapterRegistry([ZjlibAdapter(), ZstuAdapter(entry_url=zstu_entry)])
+    """构造适配器注册表（trust/credentials 管理用）。"""
+    return AdapterRegistry(_build_adapters())
 
 
 def cmd_credentials_set(args) -> int:

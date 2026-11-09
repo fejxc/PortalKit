@@ -488,6 +488,12 @@ class Engine:
             AuthCode.INVALID_CREDENTIALS: (
                 PortalState.FAILED, Phase.WAITING_USER, ErrorCode.INVALID_CREDENTIALS,
                 "账号或密码无效，请更新凭据（不自动重试）"),
+            AuthCode.ACCOUNT_LOCKED: (
+                PortalState.FAILED, Phase.WAITING_USER, ErrorCode.ACCOUNT_LOCKED,
+                "账号受限（欠费/锁定/停机）：请到学校自助服务网站处理，处理后再认证"),
+            AuthCode.AUTH_QUOTA: (
+                PortalState.FAILED, Phase.WAITING_USER, ErrorCode.AUTH_QUOTA,
+                "已达在线设备上限：请先在其他设备上注销校园网，再点「立即认证」"),
             AuthCode.INTERACTION_REQUIRED: (
                 PortalState.INTERACTION_REQUIRED, Phase.WAITING_USER, ErrorCode.INTERACTION_REQUIRED,
                 "门户要求网页操作（验证码等），请人工完成"),

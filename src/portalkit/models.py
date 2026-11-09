@@ -67,6 +67,8 @@ class AuthCode(str, Enum):
     SUCCESS = "success"
     ALREADY_AUTHENTICATED = "already_authenticated"
     INVALID_CREDENTIALS = "invalid_credentials"
+    ACCOUNT_LOCKED = "account_locked"        # 欠费/停机/锁定/冻结（账号状态异常）
+    AUTH_QUOTA = "auth_quota"                # 设备数/会话数上限（含"账号已在别处在线"）
     INTERACTION_REQUIRED = "interaction_required"
     PORTAL_CHANGED = "portal_changed"
     NETWORK_ERROR = "network_error"
@@ -81,6 +83,8 @@ class ErrorCode(str, Enum):
     TRUST_REQUIRED = "trust_required"
     NEED_CREDENTIALS = "need_credentials"
     INVALID_CREDENTIALS = "invalid_credentials"
+    ACCOUNT_LOCKED = "account_locked"
+    AUTH_QUOTA = "auth_quota"
     INTERACTION_REQUIRED = "interaction_required"
     PORTAL_CHANGED = "portal_changed"
     UNTRUSTED_TARGET = "untrusted_target"
@@ -162,6 +166,10 @@ def message_key_for(phase: Phase, error: ErrorCode = ErrorCode.NONE) -> str:
     """状态/错误到文案字典 key（FLOWS_AND_COPY.md 文案字典）的映射。"""
     if error == ErrorCode.INVALID_CREDENTIALS:
         return "error.invalid_creds"
+    if error == ErrorCode.ACCOUNT_LOCKED:
+        return "error.account_locked"
+    if error == ErrorCode.AUTH_QUOTA:
+        return "error.auth_quota"
     if error == ErrorCode.PORTAL_CHANGED:
         return "error.portal_changed"
     if error == ErrorCode.INTERACTION_REQUIRED:

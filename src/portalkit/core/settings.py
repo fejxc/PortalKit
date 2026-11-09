@@ -17,6 +17,8 @@ class Settings:
     notify_on_error: bool = True    # 异常/需要操作系统通知
     check_interval_s: int = 120     # 低频兜底检查；仅允许 30/60/120（防过短轮询）
     launch_at_login: bool = False
+    auto_check_updates: bool = True   # 后台检查 GitHub Release（仅提醒，绝不自动安装）
+    share_anonymous_stats: bool = False  # 检查更新时附带匿名聚合计数（默认关，明示开关）
 
 
 class SettingsStore:
@@ -40,6 +42,8 @@ class SettingsStore:
                 notify_on_error=bool(raw.get("notify_on_error", True)),
                 check_interval_s=interval,
                 launch_at_login=bool(raw.get("launch_at_login", False)),
+                auto_check_updates=bool(raw.get("auto_check_updates", True)),
+                share_anonymous_stats=bool(raw.get("share_anonymous_stats", False)),
             )
         except (OSError, ValueError, TypeError):
             return Settings()

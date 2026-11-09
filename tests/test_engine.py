@@ -276,6 +276,26 @@ def test_invalid_credentials_no_retry(monkeypatch, tmp_path):
     assert adapter.auth_calls == 1
 
 
+@pytest.mark.parametrize("auth_code,error_code,phrase", [
+    (AuthCode.ACCOUNT_LOCKED, ErrorCode.ACCOUNT_LOCKED, "自助服务"),
+    (AuthCode.AUTH_QUOTA, ErrorCode.AUTH_QUOTA, "其他设备"),
+])
+def test_account_state_failures_surface_actionable_hint(
+    monkeypatch, tmp_path, auth_code, error_code, phrase
+):
+    """v1.3 失败码体系：欠费/锁定与设备上限转用户处理，且菜单 detail
+    必须带可行动指引（适配器未给 recovery_hint 时用引擎默认文案）。"""
+    adapter = FakeAdapter(auth_results=[AuthResult(auth_code, "portal rejected")])
+    engine = _engine(monkeypatch, tmp_path, FakeMonitor(_snapshot()), adapter,
+                     [_internet(InternetState.BLOCKED)],
+                     creds=Credentials("u", "p"))
+    state = engine.authenticate()
+    assert state.phase == Phase.WAITING_USER
+    assert state.error_code == error_code
+    assert phrase in state.detail
+    assert adapter.auth_calls == 1
+
+
 def test_network_error_retries_bounded_then_succeeds(monkeypatch, tmp_path):
     """A09：临时错误有界退避；三次内成功。"""
     adapter = FakeAdapter(auth_results=[

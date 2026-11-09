@@ -558,11 +558,30 @@ _AUTH_CODE_CN = {
     "success": "提交成功",
     "already_authenticated": "会话仍有效",
     "invalid_credentials": "门户拒绝：账号或密码无效",
+    "account_locked": "门户拒绝：账号受限（欠费/锁定/停机）",
+    "auth_quota": "门户拒绝：已达在线设备/会话上限",
     "interaction_required": "门户要求网页操作",
     "portal_changed": "门户特征变化",
     "network_error": "网络临时失败",
     "untrusted_target": "重定向到未授权目标，已终止",
     "unknown_error": "未知结果",
+}
+
+# 错误码 → 行动指引（诊断窗口"建议"行；菜单一行文案由引擎 detail 承担）
+_ERROR_ADVICE = {
+    "invalid_credentials": "更新凭据：菜单栏 → 录入 / 更新凭据…",
+    "account_locked": "账号被门户限制（欠费/锁定/停机）。请到学校自助服务网站处理后再认证。",
+    "auth_quota": "已达在线设备数上限。请先在其他设备上注销校园网，再点「立即认证」。",
+    "interaction_required": "门户要求网页操作（验证码等）：请用浏览器完成一次登录。",
+    "portal_changed": "门户特征变化已暂停自动提交。若确认是正常改版，请重新「添加 / 确认可信网络…」。",
+    "untrusted_target": "登录请求被重定向到陌生站点，已终止且未发送凭据。请确认网络环境后重新检查。",
+    "need_credentials": "录入凭据：菜单栏 → 录入 / 更新凭据…",
+    "trust_required": "确认信任：菜单栏 → 添加 / 确认可信网络…",
+    "verify_failed": "尝试「强制刷新会话」；无效则忽略此 Wi-Fi 后重新加入。",
+    "network_error": "网络临时故障，稍后自动重试；也可手动「重新检查网络」。",
+    "no_physical_interface": "请连接 Wi-Fi 或以太网后重试。",
+    "no_adapter_matched": "未识别到已知门户。可在该网络下点「添加 / 确认可信网络…」检测。",
+    "engine_busy": "任务执行中，请稍候。",
 }
 
 
@@ -642,6 +661,9 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
             f"  说明: {state.detail or '-'}",
             *(f"  · {e}" for e in state.evidence),
         ]
+        advice = _ERROR_ADVICE.get(state.error_code.value)
+        if advice:
+            lines.append(f"  建议: {advice}")
     readable = _readable_events(ctx, tail=tail,
                                 only_issues=bool(getattr(ctx, "only_issues", False)))
     lines += ["", "最近事件（最新在最上）:"] + [f"  {line}" for line in readable]
@@ -776,11 +798,13 @@ class DiagnosticsWindow:
 class SettingsWindow:
     def __init__(self, ctx: "UIContext") -> None:
         self.ctx = ctx
-        self.win = _window("PortalKit — 设置", 420, 236)
+        self.win = _window("PortalKit — 设置", 420, 288)
         settings = self.ctx.settings.get()
-        form = FormLayout(self.win.contentView(), width=380, top=196)
+        form = FormLayout(self.win.contentView(), width=380, top=248)
         self.auto = form.checkbox("在已信任网络自动认证", settings.auto_auth)
         self.notify = form.checkbox("异常与需要操作时系统通知", settings.notify_on_error)
+        self.updates = form.checkbox("自动检查新版本（仅提醒，不自动安装）", settings.auto_check_updates)
+        self.telemetry = form.checkbox("随更新检查附带匿名聚合计数（默认关，无账号/主机信息）", settings.share_anonymous_stats)
         form.space(4)
         form.label("兜底检查间隔")
         self.interval = form.popup([f"{s} 秒" for s in (30, 60, 120)], height=26)
@@ -823,6 +847,8 @@ class SettingsWindow:
         settings = self.ctx.settings.get()
         self.auto.setState_(NSControlStateValueOn if settings.auto_auth else NSControlStateValueOff)
         self.notify.setState_(NSControlStateValueOn if settings.notify_on_error else NSControlStateValueOff)
+        self.updates.setState_(NSControlStateValueOn if settings.auto_check_updates else NSControlStateValueOff)
+        self.telemetry.setState_(NSControlStateValueOn if settings.share_anonymous_stats else NSControlStateValueOff)
         self.interval.selectItemAtIndex_((30, 60, 120).index(settings.check_interval_s))
 
     def show(self) -> None:
@@ -835,6 +861,8 @@ class SettingsWindow:
         self.ctx.settings.update(
             auto_auth=self.auto.state() == NSControlStateValueOn,
             notify_on_error=self.notify.state() == NSControlStateValueOn,
+            auto_check_updates=self.updates.state() == NSControlStateValueOn,
+            share_anonymous_stats=self.telemetry.state() == NSControlStateValueOn,
             check_interval_s=(30, 60, 120)[self.interval.indexOfSelectedItem()],
         )
         self.ctx.on_settings_changed()

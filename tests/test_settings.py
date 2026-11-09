@@ -14,6 +14,8 @@ def test_defaults(tmp_path):
     assert s.notify_on_error is True
     assert s.check_interval_s == 120
     assert s.launch_at_login is False
+    assert s.auto_check_updates is True  # 仅提醒；从不自动安装
+    assert s.share_anonymous_stats is False  # 匿名遥测默认关，明示开关
 
 
 def test_update_roundtrip_and_whitelist(tmp_path):

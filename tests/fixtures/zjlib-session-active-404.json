@@ -1,0 +1,14 @@
+{
+  "name": "zjlib-session-active-404",
+  "scenario": "浙图书馆现场：门户只在未认证状态伺服登录页，入口 404 = 门户可达且会话有效（detect 阶段不得当失败处理）",
+  "adapter": "zjlib",
+  "entry_url": "/cn/index.html",
+  "routes": [
+    {"method": "GET", "path": "/cn/index.html", "status": 404}
+  ],
+  "run": "detect",
+  "expect": {
+    "matched": true,
+    "already_authenticated": true
+  }
+}

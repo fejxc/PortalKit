@@ -17,6 +17,8 @@ from __future__ import annotations
 import os
 import queue
 import subprocess
+import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -57,6 +59,8 @@ _IN_FLIGHT = {
     Phase.PROBING, Phase.MATCHING, Phase.AUTHENTICATING,
     Phase.VERIFYING, Phase.RETRY_BACKOFF,
 }
+
+_UPDATE_CHECK_INTERVAL_S = 6 * 3600  # 后台更新检查频率；首查在启动后约 90 秒
 
 _TAG_BY_PHASE = {
     Phase.ONLINE_AUTHENTICATED: "已联网",
@@ -358,6 +362,14 @@ class PortalKitStatusBar:
         self._last_icon_name: str | None = None
         self._last_detail_text: str | None = None
         self._anim_timer = None
+        # 应用自更新状态（主线程专用；后台线程只做整体赋值，_tick 轮询消费）
+        self._update_phase = "idle"          # idle | checking | installing
+        self._update_manual = False          # 用户点过「检查更新…」→ 完成时弹窗
+        self._update_info = None             # UpdateInfo | None
+        self._update_ready_path: Path | None = None
+        self._pending_alert: tuple[str, str, str] | None = None
+        self._last_update_check = time.monotonic() - _UPDATE_CHECK_INTERVAL_S + 90
+        self._last_update_banner: str | None = None
 
         self._holder = StateHolder()
         self.ctx._holder = self._holder
@@ -425,6 +437,9 @@ class PortalKitStatusBar:
         self._refresh_item = add("强制刷新会话", self._on_refresh_session)
         self._cancel_item = add("取消当前任务", self._on_cancel)
         self._cancel_item.setEnabled_(False)  # 初始无任务
+        # 更新横幅：仅在有新版本/安装中/待重启时出现（_tick_inner 控制）
+        self._update_item = add("有新版本 — 点击更新", self._on_update_item)
+        self._update_item.setHidden_(True)
         add("检查更新…", self._on_check_updates)
         # 条件显示：仅在需操作/待确认/待验证时出现（_tick_inner 控制隐藏）
         self._wifi_settings_item = add("打开 Wi-Fi 设置…", self._on_wifi_settings)
@@ -529,21 +544,96 @@ class PortalKitStatusBar:
         self._windows["settings"].show()
 
     def _on_check_updates(self) -> None:
+        self._start_update_check(manual=True)
+
+    # ------------------------------------------------------------ self update
+
+    def _start_update_check(self, *, manual: bool = False) -> None:
+        """后台线程查 GitHub Release；结果由 _tick 轮询消费（不碰 AppKit）。"""
+        if self._update_phase != "idle":
+            return
         from portalkit import __version__
         from portalkit.ui.updates import check_for_update
 
-        info = check_for_update(__version__)
-        if info is None:
-            _alert("检查更新", "无法查询 GitHub Release（网络不可达或超时）。", "好")
-        elif info.has_update:
-            _alert(
-                "发现新版本",
-                f"最新版本 {info.latest_tag}，当前 {__version__}。\n{info.url}",
-                "打开 Releases 页面",
-                open_url=info.url,
-            )
-        else:
-            _alert("已是最新", f"当前版本 {__version__} 已是最新。", "好")
+        self._update_phase = "checking"
+        self._update_manual = manual
+        self._last_update_check = time.monotonic()
+
+        def work() -> None:
+            # 可选匿名遥测（默认关）：用户明示开启时附带当日聚合计数
+            telemetry = None
+            if self.ctx.settings.get().share_anonymous_stats:
+                stats = getattr(self.ctx.engine, "stats", None)
+                telemetry = stats.telemetry_summary() if stats is not None else None
+            try:
+                info = check_for_update(__version__, telemetry=telemetry)
+            except Exception:  # noqa: BLE001 — 检查失败静默，菜单可手动重试
+                info = None
+            self._update_info = info
+            self._update_phase = "idle"
+
+        threading.Thread(target=work, name="portalkit-update-check", daemon=True).start()
+
+    def _on_update_item(self) -> None:
+        if self._update_ready_path is not None:
+            self._on_restart_app()
+        elif self._update_phase == "idle" and (
+            self._update_info is not None and self._update_info.has_update
+        ):
+            if self._update_info.asset_url:
+                self._start_install()
+            else:
+                _alert(
+                    "手动安装",
+                    "该 Release 未附带 arm64 zip（或下载资产缺失），请从 Releases 页面手动安装。",
+                    "打开 Releases 页面",
+                    open_url=self._update_info.url,
+                )
+
+    def _start_install(self) -> None:
+        """后台线程下载 zip 并原位替换运行中的 .app；完成状态由 _tick 消费。"""
+        from portalkit.ui.updates import download_update, install_update, running_bundle_path
+
+        info = self._update_info
+        bundle = running_bundle_path(executable=Path(sys.executable))
+        if info is None or info.asset_url is None or bundle is None:
+            # 开发态/非 bundle 环境：无法自替换，回退网页手动安装
+            if info is not None:
+                _alert("手动安装", "当前运行环境不支持应用内更新，请从 Releases 页面手动安装。",
+                       "打开 Releases 页面", open_url=info.url)
+            return
+        self._update_phase = "installing"
+        dest = Path(tempfile.gettempdir()) / "portalkit-update.zip"
+
+        def work() -> None:
+            zip_path = download_update(info.asset_url, dest)
+            new_app = install_update(zip_path, bundle) if zip_path is not None else None
+            if new_app is not None:
+                self._update_ready_path = new_app
+                self._update_phase = "ready"
+                self._update_info = None
+            else:
+                self._update_phase = "idle"
+                self._update_info = None
+                self._pending_alert = (
+                    "更新失败",
+                    "下载或安装未完成，旧版本保持原位未受影响。\n"
+                    "可重试「检查更新…」，或从 Releases 页面手动安装。",
+                    "好",
+                )
+
+        threading.Thread(target=work, name="portalkit-update-install", daemon=True).start()
+
+    def _on_restart_app(self) -> None:
+        """启动替换后的新 bundle 并退出当前实例（launchd 不会拉起旧版）。"""
+        app_path = self._update_ready_path
+        try:
+            if app_path is not None:
+                subprocess.Popen(["open", "-n", str(app_path)])
+        except OSError:
+            pass
+        self._update_ready_path = None
+        self._app.terminate_(None)
 
     def _on_quit(self) -> None:
         self.worker.submit("quit")
@@ -600,6 +690,7 @@ class PortalKitStatusBar:
 
     def _tick_inner(self) -> None:
         state, snapshot, busy, detection = self._holder.get()
+        self._tick_update()
         if detection is not None and "onboarding" in self._windows:
             onboarding = self._windows["onboarding"]
             if onboarding.win.isVisible():
@@ -645,6 +736,50 @@ class PortalKitStatusBar:
                 Phase.WAITING_USER, Phase.TRUST_REQUIRED, Phase.DEGRADED,
             ))
         self._maybe_notify(state)
+
+    # ------------------------------------------------------- update plumbing
+
+    def _tick_update(self) -> None:
+        """更新链路的主线程消费点：调度后台检查、横幅渲染、一次性弹窗。"""
+        # 低频后台检查（设置可关；手动检查不受此限）
+        if (self._update_phase == "idle" and self._update_ready_path is None
+                and time.monotonic() - self._last_update_check > _UPDATE_CHECK_INTERVAL_S
+                and self.ctx.settings.get().auto_check_updates):
+            self._start_update_check()
+        # 一次性弹窗（手动检查结果 / 安装失败）——_tick 在主线程，runModal 安全
+        if self._pending_alert is not None:
+            title, info, ok = self._pending_alert
+            self._pending_alert = None
+            _alert(title, info, ok)
+        # 手动检查完成 → 结果弹窗（后台检查只改横幅，不打扰）
+        if self._update_manual and self._update_phase == "idle":
+            self._update_manual = False
+            info = self._update_info
+            if info is None:
+                self._pending_alert = ("检查更新", "无法查询 GitHub Release（网络不可达或超时）。", "好")
+            elif not info.has_update:
+                from portalkit import __version__
+                self._pending_alert = ("已是最新", f"当前版本 {__version__} 已是最新。", "好")
+            # 有新版本时不弹：横幅已出现且可点击，避免双层打扰
+        # 横幅文案
+        text, show = self._update_banner()
+        if text != self._last_update_banner:
+            self._last_update_banner = text
+            if text:
+                self._update_item.setTitle_(text)
+        self._update_item.setHidden_(not show)
+
+    def _update_banner(self) -> tuple[str, bool]:
+        if self._update_phase == "installing":
+            return "正在下载并安装更新…", True
+        if self._update_phase == "ready" and self._update_ready_path is not None:
+            return "更新已就绪 — 点击重启 PortalKit", True
+        info = self._update_info
+        if info is not None and info.has_update:
+            if info.asset_url:
+                return f"发现新版本 {info.latest_tag} — 点击更新", True
+            return f"发现新版本 {info.latest_tag} — 打开 Releases 页面", True
+        return "", False
 
     def _maybe_notify(self, state: StateSnapshot) -> None:
         settings = self.ctx.settings.get()

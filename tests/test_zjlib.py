@@ -95,6 +95,14 @@ def test_authenticate_credential_error_classified(portal):
     assert result.code == AuthCode.INVALID_CREDENTIALS
 
 
+def test_authenticate_locked_account_classified(portal):
+    """账号锁定/停机文案 → 账号受限码 + 自助服务指引（v1.3 失败码体系）。"""
+    _routes(portal, submit_html="<html>Error: 该账号已被锁定，请联系管理员。</html>")
+    result = _adapter(portal).authenticate(make_ctx(portal), Credentials("u1", "p1"))
+    assert result.code == AuthCode.ACCOUNT_LOCKED
+    assert "自助服务" in result.recovery_hint
+
+
 def test_authenticate_unknown_error_is_not_claimed_as_success(portal):
     _routes(portal, submit_html=GENERIC_ERROR_HTML)
     adapter = _adapter(portal)
