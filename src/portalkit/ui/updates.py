@@ -121,11 +121,20 @@ def install_update(zip_path: Path, running_bundle: Path,
     """把下载好的 zip 原位替换进 running_bundle 所在目录。
 
     安全序：解压 → 校验 .app 存在 → codesign verify → 旧版移入备份 →
-    新版移入。跨卷 mv 回退 copytree。任一步失败返回 None，旧版不受影响。
+    新版移入。任一步失败返回 None，旧版不受影响。
+
+    v1.4.1 修复：staging 必须建在目标目录旁（同卷）——macOS 上
+    /Applications（系统卷组）与 tempfile.gettempdir()（数据卷）天然
+    异 st_dev，v1.3.0 的跨卷保护会把所有 /Applications 安装误判为
+    不支持原位替换（下载成功但安装永远失败，现场实测 2026-11-16）。
     """
     if not running_bundle.is_dir() or running_bundle.suffix != ".app":
         return None
-    staging = Path(tempfile.mkdtemp(prefix="portalkit-update-"))
+    dest_dir = running_bundle.parent
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=".portalkit-update-", dir=dest_dir))
+    except OSError:
+        return None  # 目标目录不可写（权限）——交回手动安装
     try:
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(staging)
@@ -134,9 +143,6 @@ def install_update(zip_path: Path, running_bundle: Path,
             return None
         if not verify_bundle(new_app):
             return None
-        dest_dir = running_bundle.parent
-        if dest_dir.stat().st_dev != staging.stat().st_dev:
-            return None  # 跨卷：mv 语义不可靠，交给手动安装，不做半吊子 copy
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup = backup_dir / running_bundle.name
         if backup.exists():

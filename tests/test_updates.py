@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -255,3 +256,30 @@ def test_verify_bundle_invokes_codesign(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert upd.verify_bundle(tmp_path / "whatever.app")
     assert recorded["args"][:3] == ["codesign", "--verify", "--deep"]
+
+
+def test_install_stages_next_to_target_not_tmp(tmp_path, monkeypatch):
+    """v1.4.1 回归红线：staging 必须建在目标目录旁（同卷）。
+
+    macOS 上 /Applications（系统卷组）与 TMPDIR（数据卷）天然异 st_dev，
+    v1.3.0 把 staging 放系统临时目录、再以跨卷为由拒绝安装——所有
+    /Applications 标准安装"下载成功、安装必败"（2026-11-16 现场实测）。"""
+    seen = {}
+    real_mkdtemp = upd.tempfile.mkdtemp
+
+    def spy_mkdtemp(*, prefix=None, dir=None):
+        seen["dir"] = dir
+        return real_mkdtemp(prefix=prefix, dir=dir)
+
+    monkeypatch.setattr(upd.tempfile, "mkdtemp", spy_mkdtemp)
+    running = _make_running_bundle(tmp_path / "Applications")
+    zip_path = tmp_path / "update.zip"
+    _make_update_zip(zip_path)
+    _allow_verify(monkeypatch)
+
+    new_app = upd.install_update(zip_path, running, backup_dir=tmp_path / "backup")
+    assert new_app is not None
+    assert Path(seen["dir"]) == running.parent
+    # 成功安装后目标目录不留 staging 残骸
+    leftovers = [p.name for p in running.parent.iterdir() if p.name.startswith(".portalkit-update-")]
+    assert leftovers == []
