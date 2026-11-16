@@ -197,3 +197,73 @@ def test_verify_protocol_semantics(portal):
     assert adapter.verify_protocol(make_ctx(portal)).session_valid is True
     _routes(portal, redirect_to="index")
     assert adapter.verify_protocol(make_ctx(portal)).session_valid is False
+
+
+# ---------------------------------------------------------------- refresh_session
+
+def _recovery_routes(portal, *, logout_effective=True):
+    """悬挂会话场景：discovery → success.jsp（URL 带 userIndex）；
+    method=logout 后入口是否回到登录页由 logout_effective 控制。"""
+    state = {"logged_out": False}
+
+    portal.route("GET", "/generate_204", lambda p, r, q: (
+        302, {"Location": p.url("/eportal/success.jsp?userIndex=abc123")}, ""
+    ))
+    portal.route("GET", "/eportal/index.jsp", lambda p, r, q: (
+        200, {}, "<html>ePortal login page</html>"
+    ))
+
+    def success_page(p, r, q):
+        if state["logged_out"] and logout_effective:
+            # 真实门户行为：会话注销后再访问 success.jsp → 重定向回登录页
+            return 302, {"Location": p.url("/eportal/index.jsp?wlanuserip=x&mac=y&url=z")}, ""
+        return 200, {}, "success"
+    portal.route("GET", "/eportal/success.jsp", success_page)
+
+    def interface(p, r, q):
+        if q.get("method") == "logout":
+            state["logged_out"] = True
+            return 200, {}, {"result": "success"}
+        return 404, {}, {}
+    portal.route("POST", "/eportal/InterFace.do", interface)
+
+
+def _logout_requests(portal):
+    return [r for r in portal.requests
+            if r["path"] == "/eportal/InterFace.do" and "method=logout" in r["raw"]]
+
+
+def test_refresh_session_cleans_stale_session(portal):
+    """success.jsp（悬挂）→ 注销（带 userIndex）→ 入口回登录页 → SUCCESS。"""
+    _recovery_routes(portal, logout_effective=True)
+    result = _adapter(portal).refresh_session(make_ctx(portal))
+    assert result.code == AuthCode.SUCCESS
+    assert any("login form restored" in ev for ev in result.evidence)
+    logouts = _logout_requests(portal)
+    assert len(logouts) == 1 and "userIndex=abc123" in logouts[0]["body"]
+
+
+def test_refresh_session_logout_not_effective_waits_user(portal):
+    """logout 受理但入口仍 success.jsp：注销未生效 → 转人工，不谎报成功。"""
+    _recovery_routes(portal, logout_effective=False)
+    result = _adapter(portal).refresh_session(make_ctx(portal))
+    assert result.code == AuthCode.INTERACTION_REQUIRED
+    assert any("still" in ev for ev in result.evidence)
+
+
+def test_refresh_session_login_page_noop(portal):
+    """门户正在伺服登录页：无悬挂会话，直接 SUCCESS 交回引擎正常认证。"""
+    _routes(portal)  # discovery → index.jsp
+    result = _adapter(portal).refresh_session(make_ctx(portal))
+    assert result.code == AuthCode.SUCCESS
+    assert any("no stale session" in ev for ev in result.evidence)
+    assert _logout_requests(portal) == []
+
+
+def test_refresh_session_online_noop(portal):
+    """全候选直通（真在线）：无可清理会话。"""
+    for path_ in ("/generate_204", "/connecttest.txt", "/ns", "/ex"):
+        portal.route("GET", path_, lambda p, r, q: (204, {}, ""))
+    result = _adapter(portal).refresh_session(make_ctx(portal))
+    assert result.code == AuthCode.SUCCESS
+    assert any("nothing to clean" in ev for ev in result.evidence)

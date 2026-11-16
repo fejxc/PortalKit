@@ -18,6 +18,13 @@ from typing import Protocol
 
 from portalkit.adapters.base import AdapterContext, AuthCode, AuthResult, Credentials, DetectionResult, PortalAdapter
 from portalkit.adapters.registry import AdapterRegistry
+from portalkit.core.history import (
+    KIND_AUTH_FAIL,
+    KIND_AUTH_SUCCESS,
+    KIND_KICK_SUSPECTED,
+    KIND_SESSION_REFRESHED,
+    SessionHistory,
+)
 from portalkit.core.retry import RetryPolicy
 from portalkit.core.statemachine import assert_transition
 from portalkit.core.trust import TrustRegistry, TrustRecord
@@ -68,6 +75,7 @@ class Engine:
         retry_policy: RetryPolicy | None = None,
         state_dir: Path | None = None,
         stats: "LocalStats | None" = None,
+        history: SessionHistory | None = None,
     ) -> None:
         self._monitor = monitor
         self._registry = registry
@@ -77,6 +85,7 @@ class Engine:
         self._retry = retry_policy or RetryPolicy()
         self._state_dir = state_dir or DEFAULT_STATE_DIR
         self.stats = stats or LocalStats(self._state_dir / "stats.json")
+        self.history = history or SessionHistory(self._state_dir / "history.jsonl")
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------ public
@@ -117,6 +126,7 @@ class Engine:
                 # 自动重提交会与用户其他设备无限互踢——转人工决策,
                 # 手动「立即认证」仍可主动夺取。
                 self._log.event("kick_suspected", seconds_since_last=round(recent, 1))
+                self.history.record(KIND_KICK_SUSPECTED, adapter=checked.adapter_id or "")
                 return self._finish(self._state(
                     NetworkSnapshot(
                         interface=checked.interface, ipv4=None, gateway=None, dns=None
@@ -387,6 +397,8 @@ class Engine:
                     return self._cancelled(snap)
                 if recovery.code != AuthCode.SUCCESS:
                     return self._auth_failure(snap, generation, matched.adapter_id, recovery, internet)
+                self.history.record(KIND_SESSION_REFRESHED, adapter=matched.adapter_id,
+                                    host=matched.portal_host or "")
 
             if auto and not record.auto_auth:
                 # F13：此网络已关闭自动认证——止步 MATCHING，等显式 authenticate。
@@ -514,6 +526,7 @@ class Engine:
             auth.code,
             (PortalState.FAILED, Phase.ERROR, ErrorCode.UNKNOWN, "未知结果"),
         )
+        self.history.record(KIND_AUTH_FAIL, code=auth.code.value, adapter=adapter_id)
         # 适配器提供的短恢复提示优先于默认文案；完整指引在 evidence（诊断窗口）
         if auth.recovery_hint:
             detail = auth.recovery_hint
@@ -546,6 +559,9 @@ class Engine:
             # already=True(门户报会话原本有效)→ 无本次认证发生,如实用
             # "无需登录"而非"自动认证成功"(A03 的文案纪律)。
             phase = Phase.ONLINE_NO_AUTH if already else Phase.ONLINE_AUTHENTICATED
+            if not already:
+                self.history.record(KIND_AUTH_SUCCESS, adapter=adapter.id,
+                                    host=portal_host or "")
             return self._finish(self._state(
                 snap, generation, link=LinkState.READY, portal=PortalState.AUTHENTICATED,
                 internet=InternetState.REACHABLE, phase=phase,

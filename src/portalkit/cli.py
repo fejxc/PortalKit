@@ -148,6 +148,47 @@ def cmd_refresh_session(args) -> int:
     return _exit_for(state)
 
 
+_KIND_CN = {
+    "auth_success": "认证成功",
+    "auth_fail": "认证失败",
+    "kick_suspected": "疑似设备互踢",
+    "session_refreshed": "悬挂会话已清理",
+}
+
+
+def cmd_history(args) -> int:
+    """会话历史（本地留存 90 天）：按天汇总 + 明细，回答"前几天掉没掉线"。"""
+    from portalkit.core.history import SessionHistory
+
+    state_dir = Path(args.state_dir or DEFAULT_STATE_DIR)
+    history = SessionHistory(state_dir / "history.jsonl")
+    summary = history.daily_summary(days=args.days)
+    if not summary:
+        print(f"（近 {args.days} 天无会话记录——认证一旦发生即会留存）")
+        return _EXIT_OK
+    print(f"== 近 {args.days} 天会话汇总（今天在最上） ==")
+    for day, counts in summary:
+        ok = counts.get("auth_success", 0)
+        fail = sum(n for k, n in counts.items() if k == "auth_fail" or k.startswith("auth_fail:"))
+        kick = counts.get("kick_suspected", 0)
+        refreshed = counts.get("session_refreshed", 0)
+        parts = [f"成功 {ok}", f"失败 {fail}", f"互踢 {kick}"]
+        if refreshed:
+            parts.append(f"清理 {refreshed}")
+        print(f"  {day.isoformat()}  " + " · ".join(parts))
+        for key, n in sorted(counts.items()):
+            if key.startswith("auth_fail:") and n:
+                print(f"      - {key.split(':', 1)[1]} ×{n}")
+    events = history.events(days=args.days)
+    if events and args.tail > 0:
+        print(f"\n最近 {min(args.tail, len(events))} 条明细（最新在最下）:")
+        for event in events[-args.tail:]:
+            code = f"（{event.code}）" if event.code else ""
+            target = f"  {event.adapter}@{event.host}" if event.adapter else ""
+            print(f"  {event.ts}  {_KIND_CN.get(event.kind, event.kind)}{code}{target}")
+    return _EXIT_OK
+
+
 def cmd_diagnostics(args) -> int:
     state_dir = args.state_dir or DEFAULT_STATE_DIR
     print("== PortalKit 诊断（脱敏） ==")
@@ -467,6 +508,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("diagnostics", help="脱敏诊断摘要")
     p.add_argument("--tail", type=int, default=20, help="事件条数")
     p.set_defaults(func=cmd_diagnostics)
+
+    p = add("history", help="会话历史（按天汇总 + 明细，留存 90 天）")
+    p.add_argument("--days", type=int, default=7, help="汇总天数（默认 7）")
+    p.add_argument("--tail", type=int, default=20, help="明细条数（0 = 只看汇总）")
+    p.set_defaults(func=cmd_history)
 
     add("adapters", help="列出已注册适配器").set_defaults(func=cmd_adapters)
 

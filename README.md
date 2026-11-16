@@ -83,6 +83,7 @@ portalkit status                  # 网络快照 + 上次状态（不探测）
 portalkit check --json            # 物理探测 + 门户识别，不提交凭据
 portalkit authenticate            # 对已信任门户认证 + 物理验证
 portalkit refresh-session         # 强制刷新门户会话（在线时安全跳过）
+portalkit history --days 7        # 会话历史：按天汇总 + 明细（留存 90 天）
 portalkit diagnostics --tail 30   # 脱敏诊断摘要
 portalkit trust list|add|revoke   # 信任目标管理
 portalkit trust auto on|off       # 按网络开关自动认证

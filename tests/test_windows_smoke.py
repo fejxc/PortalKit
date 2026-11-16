@@ -24,7 +24,9 @@ from portalkit.ui.windows import (  # noqa: E402
     SettingsWindow,
     _fmt_expiry,
     _group_hex,
+    _history_summary_lines,
     _readable_events,
+    _readable_history,
     _resolve_username,
     mask_username,
 )
@@ -241,3 +243,79 @@ def test_unfixed_fingerprint_hint(app_shell, ctx):
     manager = ManagerWindow(ctx)
     manager.refresh()
     assert "重新添加可信网络可更新" in manager.detail_tv.string()
+
+
+# ------------------------------------------------ v1.4 会话历史展示
+
+def _write_history(state_dir, rows):
+    import json as _json
+    lines = [_json.dumps({"ts": ts, "kind": kind, "code": code,
+                          "adapter": adapter, "host": ""})
+             for ts, kind, code, adapter in rows]
+    (state_dir / "history.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_readable_history_renders_kinds_and_dates(app_shell, ctx):
+    from datetime import datetime, timezone
+    from portalkit.core.history import SessionHistory
+
+    now = datetime.now(timezone.utc)
+    _write_history(ctx.state_dir, [
+        (now.isoformat(), "auth_success", "", "zstu"),
+        (now.isoformat(), "auth_fail", "auth_quota", "zstu"),
+        (now.isoformat(), "kick_suspected", "", ""),
+    ])
+    lines = _readable_history(ctx, tail=10, only_issues=False)
+    assert lines is not None
+    assert lines[0].startswith("[") is False or lines[-1]  # 有输出即可
+    joined = "\n".join(lines)
+    assert "认证成功" in joined and "认证失败" in joined
+    assert "已达在线设备/会话上限" in joined  # code → 中文
+    assert "疑似设备互踢" in joined
+
+
+def test_readable_history_only_issues_filters_success(app_shell, ctx):
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    _write_history(ctx.state_dir, [
+        (now.isoformat(), "auth_success", "", "zstu"),
+        (now.isoformat(), "auth_fail", "invalid_credentials", "zstu"),
+    ])
+    lines = _readable_history(ctx, tail=10, only_issues=True)
+    assert lines is not None
+    assert len(lines) == 1 and "账号或密码无效" in lines[0]
+
+
+def test_readable_history_missing_file_returns_none(app_shell, ctx):
+    assert _readable_history(ctx, tail=10) is None
+
+
+def test_history_summary_lines_format(app_shell, ctx):
+    from portalkit.core.history import SessionHistory
+
+    SessionHistory(ctx.state_dir / "history.jsonl")  # 只为确认模块可导入
+    from portalkit.core.history import KIND_AUTH_FAIL, KIND_AUTH_SUCCESS
+    history = SessionHistory(ctx.state_dir / "history.jsonl")
+    history.record(KIND_AUTH_SUCCESS, adapter="zstu")
+    history.record(KIND_AUTH_FAIL, code="auth_quota", adapter="zstu")
+    lines = _history_summary_lines(ctx, days=7)
+    assert len(lines) == 1
+    assert "成功 1" in lines[0] and "失败 1" in lines[0]
+    assert "设备" in lines[0]  # auth_quota 的中文描述进入失败细分
+
+
+def test_diagnostics_text_includes_history_summary(app_shell, ctx):
+    from portalkit.core.history import KIND_KICK_SUSPECTED, SessionHistory
+    from portalkit.ui.windows import _diagnostics_text
+
+    SessionHistory(ctx.state_dir / "history.jsonl").record(KIND_KICK_SUSPECTED)
+    text = _diagnostics_text(ctx)
+    assert "近 7 天会话汇总" in text
+    assert "互踢 1" in text
+
+
+def test_settings_window_constructs_with_telemetry_preview(app_shell, ctx):
+    """v1.4 设置窗口新增「查看将上报的数据」按钮——构造期回归。"""
+    settings = SettingsWindow(ctx)
+    assert settings.win is not None

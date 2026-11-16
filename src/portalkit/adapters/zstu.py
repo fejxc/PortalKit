@@ -449,6 +449,67 @@ class ZstuAdapter:
 
     # ------------------------------------------------------- verify_protocol
 
+    def refresh_session(self, ctx: AdapterContext) -> AuthResult:
+        """悬挂会话清理：success.jsp（门户报有效但物理断）→ 注销 → 验证登录页回归。
+
+        ePortal 家族的注销入口是 InterFace.do?method=logout；userIndex 取自
+        success.jsp 入口 URL 的同名参数（登录成功后门户回带）。**最终判据是
+        注销后入口回到 index.jsp**——logout 响应 200 只是受理，不算生效
+        （与 zjlib「重新看到登录表单才报告可继续」同一纪律）。
+        协议行为基于 ePortal 公开惯例实现，zstu 现场验证待 A02 闭环。
+        """
+        try:
+            client, result = self._discover(ctx, strict_hosts=None)
+        except NetworkRequestError as exc:
+            return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                              evidence=(f"recovery: discovery failed: {exc.reason}",))
+        if result is None or result.status == 204:
+            # 无门户劫持信号：本机无可见会话，无需清理，交回引擎正常认证。
+            return AuthResult(AuthCode.SUCCESS, "status.authenticating_done",
+                              evidence=("recovery: no portal hijack, nothing to clean",))
+        path = urlsplit(result.url).path
+        if path.endswith("index.jsp"):
+            # 门户正在伺服登录页：没有悬挂会话。
+            return AuthResult(AuthCode.SUCCESS, "status.authenticating_done",
+                              evidence=("recovery: login page served, no stale session",))
+        if not path.endswith("success.jsp"):
+            return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                              evidence=(f"recovery: unexpected entry http {result.status}",))
+
+        fields = {}
+        user_index = _raw_query_param(_raw_query_string(result.url), "userIndex")
+        if user_index:
+            fields["userIndex"] = unquote(user_index)
+        else:
+            # 无 userIndex：退化为按会话 queryString 注销（部分部署支持）。
+            fields["queryString"] = _raw_query_string(result.url)
+        try:
+            ctx.check_generation()
+            logout = _post_interface(client, _endpoint_for(result.url, "logout"),
+                                     fields, result.url)
+        except NetworkRequestError as exc:
+            return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                              evidence=(f"recovery: logout request failed: {exc.reason}",))
+        evidence = [f"recovery.logout: http {logout.status}"]
+        if logout.status != 200:
+            return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                              evidence=(*evidence, "recovery: logout endpoint rejected"))
+        # 生效判据：入口回到登录页。
+        try:
+            ctx.check_generation()
+            after = client.request(result.url)
+        except NetworkRequestError as exc:
+            return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                              evidence=(*evidence, f"recovery: recheck failed: {exc.reason}"))
+        after_path = urlsplit(after.url).path
+        if after.status == 200 and after_path.endswith("index.jsp"):
+            return AuthResult(AuthCode.SUCCESS, "status.authenticating_done",
+                              evidence=(*evidence, "recovery: login form restored"))
+        return AuthResult(AuthCode.INTERACTION_REQUIRED, "status.action_required",
+                              evidence=(*evidence,
+                                        f"recovery: entry still {after_path} (http {after.status})",
+                                        "门户会话未随注销释放；请忽略此 Wi-Fi 后重新加入，仍失败联系管理员。"))
+
     def verify_protocol(self, ctx: AdapterContext) -> ProtocolVerifyResult:
         try:
             client, result = self._discover(ctx, strict_hosts=None)

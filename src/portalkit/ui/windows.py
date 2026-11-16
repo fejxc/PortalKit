@@ -37,6 +37,7 @@ from AppKit import (
 )
 from Foundation import NSObject
 
+from portalkit.core.history import KIND_AUTH_FAIL, KIND_AUTH_SUCCESS, SessionHistory
 from portalkit.core.trust import TrustRecord
 from portalkit.diagnostics.logging import redact_text
 from portalkit.models import ErrorCode, Phase, StateSnapshot, utc_now_iso
@@ -695,7 +696,8 @@ _AUTH_CODE_CN = {
 _ERROR_ADVICE = {
     "invalid_credentials": "更新凭据：菜单栏 → 录入 / 更新凭据…",
     "account_locked": "账号被门户限制（欠费/锁定/停机）。请到学校自助服务网站处理后再认证。",
-    "auth_quota": "已达在线设备数上限。请先在其他设备上注销校园网，再点「立即认证」。",
+    "auth_quota": "已达在线设备数上限。请先在其他设备上注销校园网，再点「立即认证」；"
+                  "若本机此前在此网络登录过，也可先试「强制刷新会话」清理本机残留会话。",
     "interaction_required": "门户要求网页操作（验证码等）：请用浏览器完成一次登录。",
     "portal_changed": "门户特征变化已暂停自动提交。若确认是正常改版，请重新「添加 / 确认可信网络…」。",
     "untrusted_target": "登录请求被重定向到陌生站点，已终止且未发送凭据。请确认网络环境后重新检查。",
@@ -709,12 +711,84 @@ _ERROR_ADVICE = {
 }
 
 
-def _readable_events(ctx: "UIContext", tail: int = 40, only_issues: bool = False) -> list[str]:
-    """事件日志 → 可读时间线（最新在最上）。只呈现用户关心的状态流转。
+_HISTORY_KIND_CN = {
+    "auth_success": "认证成功",
+    "auth_fail": "认证失败",
+    "kick_suspected": "疑似设备互踢（其他设备抢占）",
+    "session_refreshed": "悬挂会话已清理（强制刷新）",
+}
 
-    only_issues=True 时过滤掉正常项（已联网/成功提交），只留需操作、
-    待验证、失败与系统睡眠唤醒——"扫一眼今天有没有出过事"。
+
+def _readable_history(ctx: "UIContext", tail: int = 40, only_issues: bool = False) -> list[str] | None:
+    """history.jsonl → 时间线。无历史文件/无记录返回 None（调用方退回日志）。"""
+    path = ctx.state_dir / "history.jsonl"
+    if not path.exists():
+        return None
+    history = SessionHistory(path)
+    events = history.tail(max(tail, 40))
+    if not events:
+        return None
+    if only_issues:
+        events = [e for e in events if e.kind in (KIND_AUTH_FAIL, "kick_suspected")]
+    if not events:
+        return ["（所选范围内无异常记录）"]
+    # 正序构建（同天仅首行带日期标签），输出时倒置 → 最新在最上。
+    lines: list[str] = []
+    last_day = ""
+    for event in events[-tail:]:
+        clock = _fmt_local(event.ts)  # MM-DD HH:MM；坏值回退原始串
+        if clock == "—":
+            clock = event.ts[5:16].replace("T", " ") or "—"
+        day = clock[:5]
+        prefix = "" if day == last_day else f"[{day}] "
+        last_day = day
+        text = _HISTORY_KIND_CN.get(event.kind, event.kind)
+        if event.kind == KIND_AUTH_FAIL and event.code:
+            text += f"（{_AUTH_CODE_CN.get(event.code, event.code)}）"
+        if event.adapter:
+            text += f" · {event.adapter}"
+        lines.append(f"{prefix}{clock[6:]}  {text}")
+    lines.reverse()
+    return lines
+
+
+def _history_summary_lines(ctx: "UIContext", days: int = 7) -> list[str]:
+    """按天汇总（今天在最上）："MM-DD  成功 n · 失败 n(code×n) · 互踢 n"。"""
+    history = SessionHistory(ctx.state_dir / "history.jsonl")
+    summary = history.daily_summary(days=days)
+    if not summary:
+        return []
+    lines: list[str] = []
+    for day, counts in summary:
+        parts = []
+        ok = counts.get(KIND_AUTH_SUCCESS, 0)
+        fail_total = sum(n for k, n in counts.items() if k == KIND_AUTH_FAIL or k.startswith("auth_fail:"))
+        kick = counts.get("kick_suspected", 0)
+        refreshed = counts.get("session_refreshed", 0)
+        if ok:
+            parts.append(f"成功 {ok}")
+        if fail_total:
+            codes = sorted((k.split(":", 1)[1], n) for k, n in counts.items() if k.startswith("auth_fail:"))
+            detail = "、".join(f"{_AUTH_CODE_CN.get(c, c)}×{n}" for c, n in codes)
+            parts.append(f"失败 {fail_total}" + (f"（{detail}）" if detail else ""))
+        if kick:
+            parts.append(f"互踢 {kick}")
+        if refreshed:
+            parts.append(f"清理悬挂会话 {refreshed}")
+        lines.append(f"  {day.strftime('%m-%d')}  " + (" · ".join(parts) or "无认证记录"))
+    return lines
+
+
+def _readable_events(ctx: "UIContext", tail: int = 40, only_issues: bool = False) -> list[str]:
+    """会话历史/事件日志 → 可读时间线（最新在最上）。
+
+    优先读 history.jsonl（v1.4 起的精选会话事件，留存 90 天，能回答
+    "前几天掉没掉线"）；无历史数据时退回 events.jsonl（调试日志，仅能
+    回溯数天）。only_issues=True 过滤正常项——"扫一眼有没有出过事"。
     """
+    history_lines = _readable_history(ctx, tail=tail, only_issues=only_issues)
+    if history_lines is not None:
+        return history_lines
     events_path = ctx.state_dir / "events.jsonl"
     if not events_path.exists():
         return ["（暂无事件）"]
@@ -803,6 +877,9 @@ def _diagnostics_text(ctx: "UIContext", tail: int = 40) -> str:
         advice = _ERROR_ADVICE.get(state.error_code.value)
         if advice:
             lines.append(f"  建议: {advice}")
+    summary_lines = _history_summary_lines(ctx, days=7)
+    if summary_lines:
+        lines += ["", "近 7 天会话汇总(今天在最上):"] + summary_lines
     readable = _readable_events(ctx, tail=tail,
                                 only_issues=bool(getattr(ctx, "only_issues", False)))
     lines += ["", "最近事件（最新在最上）:"] + [f"  {line}" for line in readable]
@@ -924,6 +1001,17 @@ class DiagnosticsWindow:
 
     def _export(self) -> None:
         content = redact_text(_diagnostics_text(self.ctx, tail=200), max_len=100000)
+        # 附完整会话历史（留存 90 天；history 本身无自由文本，无需二次脱敏）
+        history = SessionHistory(self.ctx.state_dir / "history.jsonl")
+        events = history.events(days=90)
+        if events:
+            content += "\n\n== 会话历史明细（近 90 天） ==\n"
+            content += "\n".join(
+                f"{_fmt_local(e.ts)}  {_HISTORY_KIND_CN.get(e.kind, e.kind)}"
+                + (f"（{e.code}）" if e.code else "")
+                + (f"  {e.adapter}@{e.host}" if e.adapter else "")
+                for e in events
+            )
         panel = NSSavePanel.savePanel()
         panel.setNameFieldStringValue_(f"portalkit-diagnostics-{utc_now_iso()[:10]}.txt")
         if panel.runModal() == NSModalResponseOK:
@@ -951,6 +1039,8 @@ class SettingsWindow:
         form.space(4)
         form.label("网络变化由系统事件驱动；此间隔仅为兜底。\n凭据保存在 Keychain，日志全程脱敏。", height=34)
         form.button_row([("保存", self._save), ("导出配置", self._export), ("导入配置", self._import)])
+        form.button_row([("查看将随更新检查上报的数据…", self._preview_telemetry)],
+                        right_align=False)
         self.refresh()
 
     def _export(self) -> None:
@@ -981,6 +1071,37 @@ class SettingsWindow:
             return
         _confirm("已导入", f"导入 {n_t} 个受信网络、{n_s} 项设置。", "好")
         self.refresh()
+
+    def _preview_telemetry(self) -> None:
+        """遥测透明化：把"到底会发什么"原样给用户看（v1.4）。"""
+        import json as _json
+
+        settings = self.ctx.settings.get()
+        if not settings.share_anonymous_stats:
+            _confirm(
+                "未上报任何数据",
+                "匿名统计未开启：更新检查只访问 GitHub Releases，不附带任何使用数据。\n"
+                "开启后也仅发送当日聚合计数（右键菜单「设置…」可随时关闭）。",
+                "好",
+            )
+            return
+        stats = getattr(self.ctx.engine, "stats", None)
+        summary = stats.telemetry_summary() if stats is not None else None
+        if summary is None:
+            _confirm(
+                "将上报的数据（匿名聚合）",
+                "已开启，但今日暂无认证活动——请求将不附带统计字段。\n"
+                "字段说明：checks=今日检查次数；auth_total/ok/fail=认证计数；\n"
+                "top_fail_code=今日最常见失败码。无账号、无主机名、无 IP、无自由文本。",
+                "好",
+            )
+            return
+        _confirm(
+            "将上报的数据（匿名聚合）",
+            f"下次更新检查将附带：\n{_json.dumps(summary, ensure_ascii=False, indent=2)}\n\n"
+            "仅当日聚合计数；无账号、无主机名、无 IP、无自由文本。",
+            "好",
+        )
 
     def refresh(self) -> None:
         settings = self.ctx.settings.get()
